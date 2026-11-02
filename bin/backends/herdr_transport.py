@@ -1,10 +1,12 @@
 """Platform-native transport for Herdr's local control socket.
 
 Herdr speaks newline-delimited JSON over a Unix domain socket. On native
-Windows, Herdr 0.9.5 reports an AF_UNIX socket file under
-%APPDATA%\\herdr\\sessions\\<name>\\herdr.sock (measured on windows-latest),
-which CPython cannot open through socket.AF_UNIX there, and its docs also
-describe a named pipe; both Windows forms are handled here.
+Windows, Herdr 0.9.5 reports its socket as a file path under
+%APPDATA%\\herdr\\sessions\\<name>\\herdr.sock, but nothing listens on that
+path as an AF_UNIX socket (connect() is refused); Herdr serves a named pipe
+whose name is that whole path: \\\\.\\pipe\\C:\\Users\\...\\herdr.sock
+(both measured on windows-latest). pipe_name() maps the reported path to
+that pipe, and an AF_UNIX connect through Winsock stays as the fallback.
 
 The raw-socket helpers in this directory (herdr-eventwait.py,
 herdr-agent-view.py, herdr-workspace-move.py) share this one module so each
@@ -119,6 +121,22 @@ def _connect_pipe(path, timeout):
             time.sleep(_PIPE_BUSY_RETRY)
 
 
+def windows_path(path):
+    """A drive path in Windows form: Git Bash's /c/Users/... becomes
+    C:\\Users\\..., and forward slashes become backslashes."""
+    if len(path) > 2 and path[0] == "/" and path[1].isalpha() and path[2] == "/":
+        path = path[1].upper() + ":" + path[2:]
+    elif len(path) == 2 and path[0] == "/" and path[1].isalpha():
+        path = path[1].upper() + ":\\"
+    return path.replace("/", "\\")
+
+
+def pipe_name(path):
+    """The named pipe Herdr serves for the socket path it reports: the
+    pipe prefix followed by the whole Windows path."""
+    return _PIPE_PREFIXES[0] + windows_path(path)
+
+
 def _connect_windows_unix(path, timeout):
     """Connect to a Windows AF_UNIX socket file. Herdr on Windows serves its
     control socket as an AF_UNIX socket file (session list reports
@@ -160,6 +178,12 @@ def connect(path, timeout):
     """Open the Herdr control socket at <path>; raise OSError on failure."""
     if WINDOWS and is_pipe_path(path):
         return _connect_pipe(path, timeout)
+    if WINDOWS:
+        try:
+            return _connect_pipe(pipe_name(path), timeout)
+        except FileNotFoundError:
+            # No pipe by that name: try the path as an AF_UNIX socket file.
+            pass
     family = getattr(socket, "AF_UNIX", None)
     if family is None:
         if WINDOWS:

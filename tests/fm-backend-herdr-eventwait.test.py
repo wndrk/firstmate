@@ -181,6 +181,28 @@ class HerdrTransportTest(unittest.TestCase):
         with self.assertRaises(OSError):
             conn.sendall(b"late\n")
 
+    def test_reported_socket_path_maps_to_herdr_pipe(self):
+        # Herdr 0.9.5 on Windows reports ...\\herdr.sock and serves a pipe
+        # named by that whole path (measured on windows-latest).
+        reported = "C:\\Users\\me\\AppData\\Roaming\\herdr\\sessions\\s\\herdr.sock"
+        want = "\\\\.\\pipe\\" + reported
+        self.assertEqual(TRANSPORT.pipe_name(reported), want)
+        self.assertEqual(TRANSPORT.pipe_name("/c/Users/me/AppData/Roaming/herdr/sessions/s/herdr.sock"), want)
+        self.assertEqual(TRANSPORT.windows_path("/d/a"), "D:\\a")
+
+    def test_windows_connect_prefers_the_pipe_then_falls_back(self):
+        reported = "C:\\h\\herdr.sock"
+        with mock.patch.object(TRANSPORT, "WINDOWS", True), \
+                mock.patch.object(TRANSPORT, "_connect_pipe", return_value="pipe") as pipe, \
+                mock.patch.object(TRANSPORT, "_connect_windows_unix", return_value="unix") as unix, \
+                mock.patch.object(TRANSPORT.socket, "AF_UNIX", None, create=True):
+            self.assertEqual(TRANSPORT.connect(reported, 1), "pipe")
+            pipe.assert_called_once_with("\\\\.\\pipe\\" + reported, 1)
+            unix.assert_not_called()
+            pipe.side_effect = FileNotFoundError(2, "no pipe")
+            self.assertEqual(TRANSPORT.connect(reported, 1), "unix")
+            unix.assert_called_once_with(reported, 1)
+
     def test_lf_stdout_tolerates_plain_streams(self):
         with mock.patch.object(TRANSPORT.sys, "stdout", io.StringIO()):
             TRANSPORT.lf_stdout()

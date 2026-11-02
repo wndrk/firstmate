@@ -66,7 +66,7 @@ These adapter behaviors switch on automatically under Git Bash (`fm_backend_herd
 
 | Area | Unix behavior | Windows behavior |
 | --- | --- | --- |
-| Control socket | Unix domain socket path | Named pipe, opened by [`bin/backends/herdr_transport.py`](../bin/backends/herdr_transport.py); the pipe name is its own identity |
+| Control socket | Unix domain socket path | Herdr reports `...\herdr\sessions\<name>\herdr.sock` but serves a named pipe named by that whole path (`\\.\pipe\C:\...\herdr.sock`); [`bin/backends/herdr_transport.py`](../bin/backends/herdr_transport.py) opens that pipe |
 | Helper output | LF | The Herdr Python helpers force LF on stdout; `bin/windows/jq` runs `jq -b` |
 | Pane cwd | Herdr's `foreground_cwd` | Herdr 0.9.5 reports no `foreground_cwd` on Windows, so the cwd of the newest bash on the pane's console comes from Git Bash's `ps -W` and `/proc/<pid>/cwd`, which also follows the subshell `treehouse get` opens |
 | Idle-shell proof | Foreground process group plus `ps` | Herdr proves the pane's one foreground process is its bash; `ps -W` maps that Windows pid to the MSYS bash and proves no child process and nothing else on its console |
