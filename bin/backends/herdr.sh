@@ -92,6 +92,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # same rule (fm_backend_herdr_pane_process_state).
 # shellcheck source=bin/fm-agent-process-lib.sh
 . "$FM_BACKEND_HERDR_ROOT/bin/fm-agent-process-lib.sh"
+# shellcheck source=bin/fm-windows-proc-lib.sh
+. "$FM_BACKEND_HERDR_ROOT/bin/fm-windows-proc-lib.sh"
 
 FM_BACKEND_HERDR_MIN_PROTOCOL=14
 # events.subscribe (the native pane.agent_status_changed push stream) and its
@@ -164,31 +166,18 @@ fm_backend_herdr_windows_host() {
     1) return 0 ;;
     0) return 1 ;;
   esac
-  case "${OSTYPE:-}" in
-    msys*|cygwin*) return 0 ;;
-  esac
-  case "$(uname -s 2>/dev/null)" in
-    MINGW*|MSYS*|CYGWIN*) return 0 ;;
-  esac
-  return 1
+  fm_windows_host
 }
 
 # fm_backend_herdr_posix_path: print <path> in Git Bash form on Windows (a
 # drive path such as C:\work\repo becomes /c/work/repo); unchanged elsewhere
 # and for anything cygpath cannot convert.
 fm_backend_herdr_posix_path() {  # <path>
-  local path=$1 converted
   if fm_backend_herdr_windows_host; then
-    case "$path" in
-      [A-Za-z]:[\\/]*|[A-Za-z]:)
-        if command -v cygpath >/dev/null 2>&1 && converted=$(cygpath -u -- "$path" 2>/dev/null) && [ -n "$converted" ]; then
-          printf '%s' "$converted"
-          return 0
-        fi
-        ;;
-    esac
+    fm_windows_posix_path "$1"
+  else
+    printf '%s' "$1"
   fi
-  printf '%s' "$path"
 }
 
 # fm_backend_herdr_presentation_preference <config-dir>: the single owner of
@@ -1595,17 +1584,7 @@ fm_backend_herdr_pane_idle_shell_sample_windows() {  # <process-info-json>
 # MSYS process and 0 for a Windows-only row, which `ps -W` lists with PPID
 # and PGID 0 and a synthetic PID (Git's bin\bash.exe wrapper is one).
 fm_backend_herdr_windows_ps_rows() {
-  local ps_bin=${FM_HERDR_PS_BIN:-ps}
-  command -v "$ps_bin" >/dev/null 2>&1 || return 1
-  "$ps_bin" -W 2>/dev/null | awk '
-    NR == 1 { next }
-    {
-      if ($1 !~ /^[0-9]+$/) { $1 = ""; $0 = $0 }
-      if (NF < 8) next
-      command = $8
-      for (i = 9; i <= NF; i++) command = command " " $i
-      print $1, $2, $4, $5, ($3 == 0 ? 0 : 1), command
-    }'
+  FM_WINDOWS_PS_BIN=${FM_HERDR_PS_BIN:-${FM_WINDOWS_PS_BIN:-ps}} fm_windows_ps_rows
 }
 
 # fm_backend_herdr_windows_shell_quiet: true when the MSYS bash whose Windows
@@ -1617,20 +1596,7 @@ fm_backend_herdr_windows_ps_rows() {
 # table (Git's bin\bash.exe wrapper, which hides the real bash one level
 # down) is never proved quiet.
 fm_backend_herdr_windows_shell_quiet() {  # <winpid>
-  local winpid=$1 rows
-  rows=$(fm_backend_herdr_windows_ps_rows) || return 1
-  printf '%s\n' "$rows" | awk -v winpid="$winpid" '
-    { pid[NR] = $1; ppid[NR] = $2; win[NR] = $3; tty[NR] = $4 }
-    $3 == winpid && $5 == 1 { shell = $1; console = $4; found++ }
-    END {
-      if (found != 1) exit 1
-      for (i = 1; i <= NR; i++) {
-        if (pid[i] == shell) continue
-        if (ppid[i] == shell) exit 1
-        if (console != "?" && tty[i] == console) exit 1
-      }
-      exit 0
-    }'
+  FM_WINDOWS_PS_BIN=${FM_HERDR_PS_BIN:-${FM_WINDOWS_PS_BIN:-ps}} fm_windows_shell_quiet "$1"
 }
 
 # fm_backend_herdr_windows_pane_cwd: the cwd, in Git Bash form, of the newest
@@ -1638,21 +1604,7 @@ fm_backend_herdr_windows_shell_quiet() {  # <winpid>
 # the pane shell itself, or the subshell `treehouse get` started in the
 # leased worktree. Cygwin publishes each process cwd at /proc/<pid>/cwd.
 fm_backend_herdr_windows_pane_cwd() {  # <winpid>
-  local winpid=$1 rows newest proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
-  rows=$(fm_backend_herdr_windows_ps_rows) || return 1
-  newest=$(printf '%s\n' "$rows" | awk -v winpid="$winpid" '
-    { pid[NR] = $1; win[NR] = $3; tty[NR] = $4; cmd[NR] = $6 }
-    $3 == winpid && $5 == 1 { shell = $1; console = $4 }
-    END {
-      if (shell == "") exit 1
-      best = shell
-      if (console != "?")
-        for (i = 1; i <= NR; i++)
-          if (tty[i] == console && cmd[i] ~ /(^|\/)bash(\.exe)?$/ && pid[i] + 0 > best + 0) best = pid[i]
-      print best
-    }') || return 1
-  [ -n "$newest" ] || return 1
-  readlink "$proc_root/$newest/cwd" 2>/dev/null
+  FM_WINDOWS_PS_BIN=${FM_HERDR_PS_BIN:-${FM_WINDOWS_PS_BIN:-ps}} fm_windows_console_cwd "$1"
 }
 
 # fm_backend_herdr_projection_order_best_effort: place the exact workspace id

@@ -1,9 +1,11 @@
 name: Windows Herdr
 
-# Native Windows (no WSL) support for the Herdr backend: docs/windows.md.
-# Runs the Windows-specific unit tests and the end-to-end probe
-# (bin/fm-windows-herdr-probe.sh) against real herdr.exe, jq.exe,
-# treehouse.exe, and Python under Git Bash on a windows-latest runner.
+# Native Windows (no WSL) support for Herdr: docs/windows.md.
+# One job per backend, each under Git Bash on a windows-latest runner:
+#   - herdr-core (backend hc, the core under the Herdr app):
+#     bin/fm-windows-hc-probe.sh against real herdr-core and treehouse.
+#   - Herdr 1 (backend herdr, herdr.exe): the transport unit tests and
+#     bin/fm-windows-herdr-probe.sh against real herdr.exe and Python.
 
 on:
   push:
@@ -15,6 +17,10 @@ on:
       - 'bin/fm-windows-setup.sh'
       - 'bin/windows/**'
       - 'bin/fm-windows-herdr-probe.sh'
+      - 'bin/fm-windows-hc-probe.sh'
+      - 'bin/fm-windows-proc-lib.sh'
+      - 'bin/fm-agent-process-lib.sh'
+      - 'bin/backends/hc.sh'
       - 'tests/fm-backend-herdr-eventwait.test.py'
   pull_request:
     paths:
@@ -25,6 +31,10 @@ on:
       - 'bin/fm-windows-setup.sh'
       - 'bin/windows/**'
       - 'bin/fm-windows-herdr-probe.sh'
+      - 'bin/fm-windows-hc-probe.sh'
+      - 'bin/fm-windows-proc-lib.sh'
+      - 'bin/fm-agent-process-lib.sh'
+      - 'bin/backends/hc.sh'
       - 'tests/fm-backend-herdr-eventwait.test.py'
   workflow_dispatch:
 
@@ -36,6 +46,79 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  windows-hc:
+    name: herdr-core (Herdr app) on native Windows
+    runs-on: windows-latest
+    # Normal tier: installs plus a bounded probe of about two minutes.
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install herdr-core, Treehouse, and jq
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          Invoke-RestMethod https://releases.herdr.dev/core/install.ps1 | Invoke-Expression
+          Invoke-RestMethod https://kunchenguid.github.io/treehouse/install.ps1 | Invoke-Expression
+          choco install jq --no-progress --limit-output -y
+
+          function Add-ToolDir([string]$name, [string[]]$roots) {
+            $tool = Get-Command "$name.exe" -ErrorAction SilentlyContinue
+            if (-not $tool) {
+              foreach ($root in $roots) {
+                if (-not $root -or -not (Test-Path $root)) { continue }
+                $found = Get-ChildItem -Path $root -Filter "$name.exe" -Recurse -ErrorAction SilentlyContinue |
+                  Sort-Object LastWriteTime -Descending | Select-Object -First 1
+                if ($found) { $tool = $found; break }
+              }
+            }
+            if (-not $tool) { throw "$name.exe not found after install" }
+            $path = if ($tool.PSObject.Properties.Name -contains 'Source') { $tool.Source } else { $tool.FullName }
+            Split-Path -Parent $path | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+            "$name -> $path"
+          }
+          Add-ToolDir herdr-core @("$env:LOCALAPPDATA\Programs\herdr-core")
+          Add-ToolDir treehouse @("$env:USERPROFILE\.treehouse", "$env:LOCALAPPDATA", "$env:USERPROFILE\.local")
+          Add-ToolDir jq @("$env:ProgramData\chocolatey")
+
+      - name: Install the Herdr app (informational)
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          Invoke-RestMethod https://releases.herdr.dev/app/install.ps1 | Invoke-Expression
+          $app = Join-Path $env:LOCALAPPDATA 'Programs\herdr-app'
+          if (Test-Path $app) { $app | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8; Get-ChildItem $app | Select-Object -First 20 }
+
+      - name: Apply Firstmate Windows setup for herdr-core
+        run: |
+          set -u
+          bin/fm-windows-setup.sh --backend hc || true
+          bin/fm-windows-setup.sh --backend hc --check
+          echo '--- herdr-core config'
+          cat "$(cygpath -u "$APPDATA")/herdr-core/config.toml"
+
+      - name: End-to-end herdr-core probe
+        run: |
+          set -u
+          # shellcheck source=/dev/null
+          . ~/.bashrc
+          bin/fm-windows-hc-probe.sh
+
+      - name: Existing hc adapter suite (informational)
+        continue-on-error: true
+        timeout-minutes: 10
+        run: |
+          set -u
+          # shellcheck source=/dev/null
+          . ~/.bashrc
+          bash tests/fm-backend-hc.test.sh
+
   windows-herdr:
     name: Herdr on native Windows
     runs-on: windows-latest
@@ -78,8 +161,8 @@ jobs:
       - name: Apply Firstmate Windows setup
         run: |
           set -u
-          bin/fm-windows-setup.sh || true
-          bin/fm-windows-setup.sh --check
+          bin/fm-windows-setup.sh --backend herdr || true
+          bin/fm-windows-setup.sh --backend herdr --check
           echo '--- herdr config'
           cat "$(cygpath -u "$APPDATA")/herdr/config.toml"
 

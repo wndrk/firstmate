@@ -357,7 +357,56 @@ test_required_tool_check_uses_the_adapter_resolver() {
   pass "hc: the bootstrap tool check resolves hc exactly as the adapter does"
 }
 
+# Native Windows: hc names the terminal's Git Bash shell (Windows pid 4100) as
+# the foreground for its whole life, so agent state and cwd come from Git
+# Bash's `ps -W` table and /proc. The fake table below holds three terminal
+# shells: 4100 runs claude.exe through a launcher bash, 4200 runs nothing,
+# and 4300 runs `sleep`. 4400 is not an MSYS process at all.
+write_windows_ps() {  # <dir>
+  cat > "$1/ps" <<'SH'
+#!/usr/bin/env bash
+cat <<'PS'
+      PID    PPID    PGID     WINPID   TTY         UID    STIME COMMAND
+  4194300       0       0       4400  ?              0 08:00:00 C:\Program Files\Git\bin\bash.exe
+      100       1     100       4100  cons0     197108 08:00:01 /usr/bin/bash
+      101     100     101       5101  cons0     197108 08:00:02 /usr/bin/bash
+      102     101     101       5102  cons0     197108 08:00:03 /c/Users/me/.local/bin/claude.exe
+      200       1     200       4200  cons1     197108 08:00:04 /usr/bin/bash
+I     300       1     300       4300  cons2     197108 08:00:05 /usr/bin/bash
+      301     300     301       5301  cons2     197108 08:00:06 /usr/bin/sleep
+PS
+SH
+  chmod +x "$1/ps"
+  mkdir -p "$1/proc/100" "$1/proc/101" "$1/proc/200"
+  ln -s /c/work/repo "$1/proc/100/cwd"
+  ln -s /c/Users/me/.treehouse/repo-1/1/repo "$1/proc/101/cwd"
+  ln -s /c/work/idle "$1/proc/200/cwd"
+}
+
+test_windows_agent_state_and_cwd_read_git_bash_processes() {
+  local tag out a
+  setup_case windows
+  tag=$(hometag_of)
+  write_windows_ps "$D"
+  for a in t1:4100 t2:4200 t3:4300 t4:4400; do
+    write_terminal "$D" "${a%%:*}" live fm-a1 "$tag" bash.exe 'C:\Program Files\Git\usr\bin\bash.exe'
+    jq --argjson p "${a#*:}" '.foreground.pid = $p | .foreground.cwd = "C:\\work\\start\\"' \
+      "$D/${a%%:*}.json" > "$D/tmp.json" && mv "$D/tmp.json" "$D/${a%%:*}.json"
+  done
+  # shellcheck disable=SC2016 # the inner shell expands it
+  out=$(FM_BACKEND_HC_WINDOWS=1 FM_WINDOWS_PS_BIN="$D/ps" FM_PROC_ROOT_OVERRIDE="$D/proc" \
+    hc_shell 'for a in t1 t2 t3 t4; do printf "%s=%s " $a "$(fm_backend_agent_state hc fmtest:$a)"; done')
+  assert_equals "$out" "t1=alive t2=dead t3=ambiguous t4=ambiguous " \
+    "Windows agent_state over a shell running claude.exe, an idle shell, a shell running sleep, an unseen shell"
+  out=$(FM_BACKEND_HC_WINDOWS=1 FM_WINDOWS_PS_BIN="$D/ps" FM_PROC_ROOT_OVERRIDE="$D/proc" \
+    hc_shell 'fm_backend_hc_current_path fmtest:t1 fm-a1; fm_backend_hc_current_path fmtest:t2 fm-a1')
+  assert_equals "$out" $'/c/Users/me/.treehouse/repo-1/1/repo\n/c/work/idle' \
+    "Windows current_path follows the newest bash on the terminal's console"
+  pass "hc: on Windows, agent state and cwd come from Git Bash's process table, not hc's one shell process"
+}
+
 fm_test_run \
+  test_windows_agent_state_and_cwd_read_git_bash_processes \
   test_hc_is_spawn_capable_and_never_autodetected \
   test_required_tool_check_uses_the_adapter_resolver \
   test_create_task_is_independent_labeled_and_refuses_duplicates \

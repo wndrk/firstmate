@@ -44,12 +44,26 @@ cp -R "$ROOT/bin/windows" "$FM/bin/windows"
 git -C "$FM" init -q
 git -C "$FM" add -A >/dev/null 2>&1
 
+# setup runs the Herdr 1 (herdr.exe) form; setup_hc runs the herdr-core form
+# with a fake herdr-core on PATH.
 setup() {  # <home> [args...]
   local home=$1
   shift
-  HOME="$home" APPDATA="$home/AppData/Roaming" HERDR_CONFIG_PATH='' \
-    PATH="$FAKEBIN:$PATH" bash "$FM/bin/fm-windows-setup.sh" "$@"
+  HOME="$home" APPDATA="$home/AppData/Roaming" HERDR_CONFIG_PATH='' XDG_CONFIG_HOME='' \
+    PATH="$FAKEBIN:$PATH" bash "$FM/bin/fm-windows-setup.sh" --backend herdr "$@"
 }
+
+setup_hc() {  # <home> [args...]
+  local home=$1
+  shift
+  HOME="$home" APPDATA="$home/AppData/Roaming" HERDR_CONFIG_PATH='' XDG_CONFIG_HOME='' \
+    PATH="$HC_FAKEBIN:$FAKEBIN:$PATH" bash "$FM/bin/fm-windows-setup.sh" "$@"
+}
+
+HC_FAKEBIN="$TMP_ROOT/hc-bin"
+mkdir -p "$HC_FAKEBIN"
+printf '%s\n' '#!/usr/bin/env bash' 'echo "hc 0.2.0"' >"$HC_FAKEBIN/herdr-core"
+chmod +x "$HC_FAKEBIN/herdr-core"
 
 fresh_home() {  # <name>
   local home="$TMP_ROOT/$1"
@@ -58,6 +72,8 @@ fresh_home() {  # <name>
 }
 
 config_of() { printf '%s\n' "$1/AppData/Roaming/herdr/config.toml"; }
+hc_config_of() { printf '%s\n' "$1/AppData/Roaming/herdr-core/config.toml"; }
+HC_SHELL_LINE="shell = ['C:\\Git\\usr\\bin\\bash.exe', '--login', '-i']"
 
 test_apply_writes_herdr_shell_and_bashrc() {
   local home out config
@@ -143,12 +159,50 @@ test_git_launcher_shell_is_upgraded() {
   pass "Git's bin\\bash.exe launcher is upgraded to usr\\bin\\bash.exe without --force"
 }
 
+test_hc_backend_sets_herdr_core_shell() {
+  local home config before
+  rm -f "$FM/config/backend"
+  home=$(fresh_home hc)
+  setup_hc "$home" >/dev/null 2>&1
+  config=$(hc_config_of "$home")
+  [ -f "$config" ] || fail "hc apply did not create herdr-core's config"
+  [ "$(head -1 "$config")" = "$HC_SHELL_LINE" ] || fail "herdr-core shell is not Git Bash as a login shell: $(cat "$config")"
+  [ ! -e "$(config_of "$home")" ] || fail "hc apply wrote Herdr 1's config"
+  [ "$(cat "$FM/config/backend")" = hc ] || fail "herdr-core on PATH did not select backend hc"
+  # shellcheck disable=SC2016 # the literal line the block carries
+  grep -qF 'export FM_BACKEND="${FM_BACKEND:-hc}"' "$home/.bashrc" || fail "bashrc block does not default to hc"
+  printf '%s\n' '[ui]' 'x = 1' >>"$config"
+  before=$(cat "$config")
+  setup_hc "$home" >/dev/null 2>&1
+  [ "$(cat "$config")" = "$before" ] || fail "a second hc apply changed herdr-core's config"
+  printf '%s\n' "shell = ['pwsh.exe']" '[ui]' >"$config"
+  setup_hc "$home" >/dev/null 2>&1
+  [ "$(head -1 "$config")" = "shell = ['pwsh.exe']" ] || fail "hc apply replaced a user-chosen shell without --force"
+  setup_hc "$home" --force >/dev/null 2>&1
+  [ "$(head -1 "$config")" = "$HC_SHELL_LINE" ] || fail "--force did not replace the herdr-core shell: $(cat "$config")"
+  [ "$(grep -c '^shell' "$config")" = 1 ] || fail "--force left two shell lines"
+  pass "backend hc sets herdr-core's shell to Git Bash, selects hc, and keeps a chosen shell without --force"
+}
+
+test_explicit_backend_switches_config_backend() {
+  local home
+  home=$(fresh_home switch)
+  printf 'herdr\n' >"$FM/config/backend"
+  setup_hc "$home" >/dev/null 2>&1
+  [ "$(cat "$FM/config/backend")" = herdr ] || fail "an existing config/backend changed without --backend"
+  setup_hc "$home" --backend hc >/dev/null 2>&1
+  [ "$(cat "$FM/config/backend")" = hc ] || fail "--backend hc did not switch config/backend"
+  pass "config/backend changes only when --backend names another backend"
+}
+
 # The end-to-end probe only runs on the windows-latest workflow; here it must
 # at least parse, so a syntax slip fails on every runner.
 test_windows_probe_parses() {
   bash -n "$ROOT/bin/fm-windows-herdr-probe.sh" \
     || fail "bin/fm-windows-herdr-probe.sh does not parse"
-  pass "the Windows Herdr probe parses"
+  bash -n "$ROOT/bin/fm-windows-hc-probe.sh" \
+    || fail "bin/fm-windows-hc-probe.sh does not parse"
+  pass "the Windows Herdr and herdr-core probes parse"
 }
 
 fm_test_run \
@@ -158,4 +212,6 @@ fm_test_run \
   test_conflicting_shell_needs_force \
   test_git_launcher_shell_is_upgraded \
   test_refuses_off_windows \
+  test_hc_backend_sets_herdr_core_shell \
+  test_explicit_backend_switches_config_backend \
   test_windows_probe_parses
