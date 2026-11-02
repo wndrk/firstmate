@@ -83,7 +83,10 @@ class EventWaitReadLineTest(unittest.TestCase):
 
     def test_main_reports_early_stream_closure(self):
         stdout = io.StringIO()
-        with mock.patch.object(READER.socket, "socket", return_value=ClosingStreamSocket()):
+        # Windows Python has no AF_UNIX; these cases exercise the Unix-socket
+        # path, so provide the constant there.
+        with mock.patch.object(READER.socket, "AF_UNIX", 1, create=True), \
+                mock.patch.object(READER.socket, "socket", return_value=ClosingStreamSocket()):
             with mock.patch.object(READER.sys, "stdout", stdout):
                 result = READER.main(["herdr-eventwait.py", "socket", "1", "pane"])
 
@@ -92,9 +95,10 @@ class EventWaitReadLineTest(unittest.TestCase):
 
     def test_main_does_not_signal_readiness_before_valid_ack(self):
         stdout = io.StringIO()
-        with mock.patch.object(
-            READER.socket, "socket", return_value=RejectedSubscriptionSocket()
-        ):
+        with mock.patch.object(READER.socket, "AF_UNIX", 1, create=True), \
+                mock.patch.object(
+                    READER.socket, "socket", return_value=RejectedSubscriptionSocket()
+                ):
             with mock.patch.object(READER.sys, "stdout", stdout):
                 result = READER.main(["herdr-eventwait.py", "socket", "1", "pane"])
 

@@ -119,9 +119,10 @@ def connect(path, timeout):
     """Open the Herdr control socket at <path>; raise OSError on failure."""
     if WINDOWS and is_pipe_path(path):
         return _connect_pipe(path, timeout)
-    if not hasattr(socket, "AF_UNIX"):
+    family = getattr(socket, "AF_UNIX", None)
+    if family is None:
         raise OSError("this Python has no AF_UNIX support")
-    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock = socket.socket(family, socket.SOCK_STREAM)
     try:
         sock.settimeout(timeout)
         sock.connect(path)
