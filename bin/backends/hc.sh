@@ -278,13 +278,39 @@ fm_backend_hc_target_ready() {  # <target> [expected-label]
 # fm_backend_hc_hello: the generation handshake for <session> over `hc
 # connect`. Prints the negotiated generation, nothing on failure.
 fm_backend_hc_hello() {  # <session>
-  local session=$1 out gen
-  out=$(printf '{"jsonrpc":"2.0","method":"hello","params":{"generation":%s},"id":1}\n' \
-      "$FM_BACKEND_HC_GENERATION" \
-    | fm_backend_hc_env_run "$session" connect --session "$session" 2>/dev/null) || return 1
+  local session=$1 out gen request
+  request=$(printf '{"jsonrpc":"2.0","method":"hello","params":{"generation":%s},"id":1}' \
+    "$FM_BACKEND_HC_GENERATION")
+  if fm_backend_hc_windows_host; then
+    out=$(fm_backend_hc_hello_held "$session" "$request") || return 1
+  else
+    out=$(printf '%s\n' "$request" \
+      | fm_backend_hc_env_run "$session" connect --session "$session" 2>/dev/null) || return 1
+  fi
   gen=$(printf '%s' "$out" | jq -r '.result.generation // empty' 2>/dev/null)
   [ -n "$gen" ] || return 1
   printf '%s' "$gen"
+}
+
+# fm_backend_hc_hello_held: the Windows form of the hello exchange. `hc
+# connect` forwards stdin's end as a write shutdown, which a Windows named
+# pipe cannot do without closing the whole connection, so a piped request
+# that ends at once loses its answer. The request is written to a connect
+# coprocess whose stdin stays open until one answer line arrives (bounded by
+# FM_BACKEND_HC_HELLO_TIMEOUT seconds, default 10), then the coprocess ends.
+fm_backend_hc_hello_held() {  # <session> <request>
+  local session=$1 request=$2 line='' rc=0 timeout=${FM_BACKEND_HC_HELLO_TIMEOUT:-10}
+  coproc FM_HC_CONNECT { fm_backend_hc_env_run "$session" connect --session "$session" 2>/dev/null; }
+  local pid=$FM_HC_CONNECT_PID in_fd=${FM_HC_CONNECT[1]} out_fd=${FM_HC_CONNECT[0]}
+  printf '%s\n' "$request" 1>&"$in_fd" || rc=1
+  [ "$rc" -ne 0 ] || IFS= read -r -t "$timeout" line 0<&"$out_fd" || rc=1
+  # Closing the write end ends hc's stdin, so hc itself exits too; the kill
+  # covers a connect that is still waiting.
+  exec {in_fd}>&- {out_fd}<&-
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  [ "$rc" -eq 0 ] && [ -n "$line" ] || return 1
+  printf '%s\n' "${line%$'\r'}"
 }
 
 # fm_backend_hc_container_ensure: prove the binary is herdr-core at the

@@ -74,6 +74,9 @@ else
   fail core "container_ensure failed: $(oneline <"$SCRATCH/ensure.err")"
   info core-start "$(fm_backend_hc_cli "$SESSION" server start --json 2>&1 | oneline 800)"
   info core-status "$(fm_backend_hc_cli "$SESSION" server status --json 2>&1 | oneline 800)"
+  info hello-piped "$(printf '%s\n' '{"jsonrpc":"2.0","method":"hello","params":{"generation":1},"id":1}' \
+    | fm_backend_hc_env_run "$SESSION" connect --session "$SESSION" 2>&1 | oneline 800) rc=${PIPESTATUS[1]}"
+  info hello-held "$(fm_backend_hc_hello_held "$SESSION" '{"jsonrpc":"2.0","method":"hello","params":{"generation":1},"id":1}' 2>&1 | oneline 800)"
   exit 1
 fi
 
