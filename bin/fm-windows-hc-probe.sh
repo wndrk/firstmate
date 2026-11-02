@@ -72,6 +72,8 @@ if got=$(fm_backend_hc_container_ensure 2>"$SCRATCH/ensure.err") && [ "$got" = "
   pass core "private session $SESSION started and answered the generation-1 hello over hc connect"
 else
   fail core "container_ensure failed: $(oneline <"$SCRATCH/ensure.err")"
+  info core-start "$(fm_backend_hc_cli "$SESSION" server start --json 2>&1 | oneline 800)"
+  info core-status "$(fm_backend_hc_cli "$SESSION" server status --json 2>&1 | oneline 800)"
   exit 1
 fi
 

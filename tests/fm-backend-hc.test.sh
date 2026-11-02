@@ -402,6 +402,14 @@ test_windows_agent_state_and_cwd_read_git_bash_processes() {
     hc_shell 'fm_backend_hc_current_path fmtest:t1 fm-a1; fm_backend_hc_current_path fmtest:t2 fm-a1')
   assert_equals "$out" $'/c/Users/me/.treehouse/repo-1/1/repo\n/c/work/idle' \
     "Windows current_path follows the newest bash on the terminal's console"
+  # `hc server status` never starts a core on Windows, so the gate starts it.
+  : > "$D/log"
+  FM_BACKEND_HC_WINDOWS=1 hc_shell 'fm_backend_hc_container_ensure' >/dev/null \
+    || fail "Windows container_ensure must pass against the stub"
+  assert_contains "$(cat "$D/log")" $'\x1fserver\x1fstart\x1f--json' "Windows container_ensure starts the session's core"
+  : > "$D/log"
+  FM_BACKEND_HC_WINDOWS=0 hc_shell 'fm_backend_hc_container_ensure' >/dev/null
+  assert_contains "$(cat "$D/log")" $'\x1fserver\x1fstatus\x1f--json' "Unix container_ensure keeps asking status"
   pass "hc: on Windows, agent state and cwd come from Git Bash's process table, not hc's one shell process"
 }
 

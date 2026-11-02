@@ -298,8 +298,13 @@ fm_backend_hc_container_ensure() {
     || { echo "error: backend=hc selected but 'jq' is not installed (required to parse hc's JSON output)" >&2; return 1; }
   session=$(fm_backend_hc_session)
   fm_backend_hc_atom_valid "$session" || { echo "error: refusing hc session name '$session'" >&2; return 1; }
-  fm_backend_hc_cli "$session" server status --json >/dev/null 2>&1 \
-    || { echo "error: 'hc server status' failed for session '$session'; is herdr-core installed and startable?" >&2; return 1; }
+  # On Windows `hc server status` only asks an existing core and never starts
+  # one (herdr-core's status_may_start_core is false there); `server start`
+  # starts the session's core or reports the one already running.
+  local verb=status
+  ! fm_backend_hc_windows_host || verb=start
+  fm_backend_hc_cli "$session" server "$verb" --json >/dev/null 2>&1 \
+    || { echo "error: 'hc server $verb' failed for session '$session'; is herdr-core installed and startable?" >&2; return 1; }
   gen=$(fm_backend_hc_hello "$session") || {
     echo "error: herdr-core session '$session' did not answer the hello handshake; is the core reachable?" >&2
     return 1
