@@ -36,9 +36,13 @@ A non-zero exit tells the bash caller to fall back to plain polling for this
 cycle (the permanent fail-closed backstop), never to go silent.
 """
 import json
+import os
 import socket
 import sys
 import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import herdr_transport  # noqa: E402  (sibling module: platform-native socket or named pipe)
 
 CONNECT_TIMEOUT = 5.0
 ACK_TIMEOUT = 5.0
@@ -84,9 +88,7 @@ def main(argv):
         return 2
 
     try:
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.settimeout(CONNECT_TIMEOUT)
-        sock.connect(sock_path)
+        sock = herdr_transport.connect(sock_path, CONNECT_TIMEOUT)
     except OSError:
         return 2
 
@@ -147,6 +149,7 @@ def main(argv):
 
 
 if __name__ == "__main__":
+    herdr_transport.lf_stdout()
     try:
         sys.exit(main(sys.argv))
     except BrokenPipeError:

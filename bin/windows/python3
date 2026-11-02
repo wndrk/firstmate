@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# bin/windows/python3 - Git Bash shim that resolves Python 3 on native Windows
+# (docs/windows.md).
+#
+# The python.org installer provides `py` and `python`, not `python3`, and the
+# Microsoft Store alias named python3.exe can be an installer stub that opens
+# the Store instead of running Python. Firstmate calls `python3` (and its
+# helpers use `#!/usr/bin/env python3`), so this shim runs, in order:
+# FM_WINDOWS_PYTHON when set, the `py -3` launcher, then a `python` that
+# reports major version 3.
+set -u
+if [ -n "${FM_WINDOWS_PYTHON:-}" ] && [ -x "${FM_WINDOWS_PYTHON}" ]; then
+  exec "$FM_WINDOWS_PYTHON" "$@"
+fi
+if command -v py >/dev/null 2>&1 && py -3 -c 'import sys' >/dev/null 2>&1; then
+  exec py -3 "$@"
+fi
+if command -v python >/dev/null 2>&1 \
+  && [ "$(python -c 'import sys; print(sys.version_info[0])' 2>/dev/null | tr -d '\r')" = 3 ]; then
+  exec python "$@"
+fi
+echo "python3: no Python 3 found; install it from python.org (winget install Python.Python.3.12) or set FM_WINDOWS_PYTHON" >&2
+exit 127

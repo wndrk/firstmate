@@ -36,7 +36,8 @@
     "docs/t3code-backend.md",
     "docs/tern-backend.md",
     "docs/hc-backend.md",
-    "docs/remote-secondmates.md"
+    "docs/remote-secondmates.md",
+    "docs/windows.md"
   ],
   "requiredOwnerPointers": [
     {
@@ -676,6 +677,10 @@
     {
       "path": ".agents/skills/validation-supervision/SKILL.md",
       "audience": "agent-runtime"
+    },
+    {
+      "path": "docs/windows.md",
+      "audience": "operator-current"
     }
   ]
 }
