@@ -44,7 +44,8 @@ lib_eval() {  # <fakebin> <expression>
   local -a session_env=()
   [ -z "${FM_TEST_SESSION_ID:-}" ] || session_env+=("CLAUDE_CODE_SESSION_ID=$FM_TEST_SESSION_ID")
   [ -z "${FM_TEST_CLAUDE_PID:-}" ] || session_env+=("CLAUDE_PID=$FM_TEST_CLAUDE_PID")
-  env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID ${session_env[@]+"${session_env[@]}"} \
+  [ -z "${FM_TEST_PI_PID:-}" ] || session_env+=("FM_PI_PID=$FM_TEST_PI_PID")
+  env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID -u FM_PI_PID ${session_env[@]+"${session_env[@]}"} \
     PATH="$fakebin:$PATH" bash -c "
     . \"\$0\"
     kill() { return \${FM_TEST_KILL_RC:-0}; }
@@ -644,6 +645,96 @@ test_windows_published_pid_needs_its_claude_session_id() {
     || fail "no anchor pid was resolved for a Windows session with its id"
   [ "$got" = 'win:7204' ] || fail "a trusted Windows session anchored '$got', expected the tagged pid win:7204"
   pass "session-lock: a published Windows Claude pid is accepted only with its session id"
+}
+
+# Pi on Windows is node.exe twice over: the launcher (pi-launcher.js) and the
+# engine it re-executes on Pi's bundled cli.js, which is the process that loads
+# Firstmate's extensions and publishes FM_PI_PID. The `ps -W` rows say only
+# node.exe, so the script each runs comes from a fake Win32 command-line reader
+# that also counts its calls.
+PI_WIN_TABLE='  4201600       0       0       8700  ?              0 22:24:48 C:\Users\u\.local\node\node.exe
+  4201601       0       0       8800  ?              0 22:24:49 C:\Users\u\.local\node\node.exe
+  4201602       0       0       8900  ?              0 22:24:50 C:\Users\u\.local\node\node.exe
+  4201603       0       0       8950  ?              0 22:24:50 C:\Users\u\.local\node\node.exe
+  4198625       0       0       4321  ?              0 22:24:48 C:\Windows\explorer.exe'
+
+pi_cmdline_bin() {  # <dir>
+  local bin="$1/fake-powershell"
+  cat > "$bin" <<'SH'
+#!/usr/bin/env bash
+printf 'x\n' >> "$FM_TEST_CMDLINE_CALLS"
+case "$*" in
+  *ProcessId=8700*) printf '%s\r\n' '"node" "C:\Users\u\.pi\agent\bin\pi-launcher.js"' ;;
+  *ProcessId=8800*) printf '%s\r\n' '"C:\Users\u\.local\node\node.exe" --no-warnings "C:\Users\u\.pi\agent\install\releases\1.5.0\node_modules\@earendil-works\pi-coding-agent\dist\bundle\cli.js"' ;;
+  *ProcessId=8900*) printf '%s\r\n' '"node" "C:\Users\u\AppData\npx-cli.js" rea-agents C:\x\pi-coding-agent\y.js' ;;
+  *ProcessId=8950*) printf '%s\r\n' '"node" "C:\tools\my-pi-coding-agent-notes\run.js"' ;;
+  *) exit 0 ;;
+esac
+SH
+  chmod +x "$bin"
+  printf '%s\n' "$bin"
+}
+
+test_windows_pi_session_is_identified_from_its_node_command_line() {
+  local dir fakebin cmdline calls got before
+  dir="$TMP_ROOT/win-pi"
+  fakebin=$(cygwin_fakebin "$dir")
+  cmdline=$(pi_cmdline_bin "$dir")
+  calls="$dir/cmdline-calls"
+  : > "$calls"
+  mkdir -p "$dir/state"
+  printf 'win:8800\n' > "$dir/state/.lock"
+  export FM_WIN_CMDLINE_BIN="$cmdline" FM_WIN_CMDLINE_CACHE_DIR="$dir/cache" FM_TEST_CMDLINE_CALLS="$calls"
+
+  got=$(FM_TEST_WIN_TABLE="$PI_WIN_TABLE" FM_TEST_PI_PID=8800 lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+    || fail "the Pi engine's published pid was not identified"
+  [ "$got" = 'win:8800' ] || fail "expected the tagged Pi pid win:8800, got '$got'"
+  FM_TEST_WIN_TABLE="$PI_WIN_TABLE" FM_TEST_PI_PID=8800 lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+    || fail "the Pi session holding the lock did not recognize itself as the owner"
+  FM_TEST_WIN_TABLE="$PI_WIN_TABLE" lib_eval "$fakebin" 'fm_harness_pid_alive win:8800' \
+    || fail "a live Windows Pi engine was classified as a dead lock owner"
+
+  # The launcher, a node script that merely mentions Pi's package in a later
+  # argument, a lookalike directory, and a non-node process are all refused.
+  for claimed in 8700 8900 8950 4321 9999; do
+    if FM_TEST_WIN_TABLE="$PI_WIN_TABLE" FM_TEST_PI_PID="$claimed" lib_eval "$fakebin" 'fm_harness_ancestry_pid' >/dev/null; then
+      fail "published Pi pid $claimed was bound as this session's harness"
+    fi
+  done
+
+  # The PowerShell lookup is cached per process row, so liveness checks stay
+  # cheap; a reused pid (a different start time) is judged afresh.
+  before=$(wc -l < "$calls")
+  FM_TEST_WIN_TABLE="$PI_WIN_TABLE" lib_eval "$fakebin" 'fm_harness_pid_alive win:8800' \
+    || fail "the cached Pi verdict was lost"
+  [ "$(wc -l < "$calls")" -eq "$before" ] || fail "a cached Pi process was looked up again"
+  if FM_TEST_WIN_TABLE="${PI_WIN_TABLE//22:24:49 C:\\Users\\u\\.local\\node\\node.exe/23:00:00 C:\\Users\\u\\.local\\node\\node.exe}" \
+    FM_WIN_CMDLINE_BIN=/nonexistent lib_eval "$fakebin" 'fm_harness_pid_alive win:8800'; then
+    fail "a reused Windows pid inherited the cached Pi verdict"
+  fi
+  # No cached verdict ever holds the command line itself.
+  if grep -rq 'cli.js' "$dir/cache"; then
+    fail "the command-line cache stored a command line"
+  fi
+  unset FM_WIN_CMDLINE_BIN FM_WIN_CMDLINE_CACHE_DIR FM_TEST_CMDLINE_CALLS
+  pass "session-lock: a Windows Pi session is identified from its node command line, cached per process"
+}
+
+test_windows_pi_extension_markers_match_a_tagged_lock() {
+  local dir fakebin
+  dir="$TMP_ROOT/win-pi-markers"
+  fakebin=$(cygwin_fakebin "$dir")
+  mkdir -p "$dir/state"
+  printf 'win:8800\n' > "$dir/state/.lock"
+  printf 'sha256:abc\n8800\n' > "$dir/state/.pi-turnend-extension-loaded"
+  # Native Node records the bare Windows pid; the lock stores it tagged.
+  lib_eval "$fakebin" ". '$ROOT/bin/fm-wake-lib.sh'; fm_pi_extension_loaded '$dir/state/.pi-turnend-extension-loaded' sha256:abc '$dir/state/.lock'" \
+    || fail "a Pi extension marker did not match the tagged Windows lock of the same pid"
+  printf 'sha256:abc\n8801\n' > "$dir/state/.pi-turnend-extension-loaded"
+  if lib_eval "$fakebin" ". '$ROOT/bin/fm-wake-lib.sh'; fm_pi_extension_loaded '$dir/state/.pi-turnend-extension-loaded' sha256:abc '$dir/state/.lock'"; then
+    fail "a Pi extension marker from another pid matched the tagged lock"
+  fi
+  pass "session-lock: Pi extension load markers match a tagged Windows lock of the same pid"
 }
 
 test_windows_clear_rekeys_the_lock_under_the_same_pid() {
@@ -1578,6 +1669,8 @@ test_a_published_identity_is_accepted_by_the_gates_that_read_the_lock
 test_windows_tagged_holder_is_a_live_foreign_owner
 test_windows_published_pid_needs_its_claude_session_id
 test_windows_clear_rekeys_the_lock_under_the_same_pid
+test_windows_pi_session_is_identified_from_its_node_command_line
+test_windows_pi_extension_markers_match_a_tagged_lock
 test_tagged_lock_is_inert_off_windows
 test_windows_task_lease_follows_a_tagged_lock_holder
 test_cygwin_ps_without_o_still_resolves_a_local_harness

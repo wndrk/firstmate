@@ -76,7 +76,7 @@ me=$(fm_session_lock_anchor_pid) || {
     # Here the parent link does not reach the harness at all, so "not in the
     # ancestry" would describe the wrong problem and send the reader hunting a
     # process tree that can never contain the answer.
-    echo "error: cannot identify this harness session on Windows: it publishes no session pid this build recognizes (see FM_WIN_HARNESS_PID_VARS in bin/fm-session-lock-lib.sh; CLAUDE_PID is taken only together with CLAUDE_CODE_SESSION_ID); operate read-only until resolved" >&2
+    echo "error: cannot identify this harness session on Windows: it publishes no session pid this build recognizes (see FM_WIN_HARNESS_PID_VARS in bin/fm-session-lock-lib.sh; CLAUDE_PID is taken only together with CLAUDE_CODE_SESSION_ID; a Pi session publishes FM_PI_PID only once its Firstmate extensions are loaded); operate read-only until resolved" >&2
   else
     echo "error: cannot locate harness process in ancestry" >&2
   fi
