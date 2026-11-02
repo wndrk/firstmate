@@ -67,8 +67,14 @@ ok() { printf 'ok    %s\n' "$*"; }
 warn() { printf 'warn  %s\n' "$*"; }
 miss() { printf 'MISS  %s\n' "$*"; problems=$((problems + 1)); }
 
-case "${OSTYPE:-}:$(uname -s 2>/dev/null)" in
-  msys*|cygwin*|*:MINGW*|*:MSYS*|*:CYGWIN*) ;;
+# FM_WINDOWS_HOST (1 or 0) overrides detection, as in bin/fm-windows-proc-lib.sh.
+case "${FM_WINDOWS_HOST:-}:${OSTYPE:-}:$(uname -s 2>/dev/null)" in
+  0:*) host_ok=0 ;;
+  1:*|*:msys*|*:cygwin*|*:*:MINGW*|*:*:MSYS*|*:*:CYGWIN*) host_ok=1 ;;
+  *) host_ok=0 ;;
+esac
+case "$host_ok" in
+  1) ;;
   *)
     echo "fm-windows-setup.sh: run this from Git Bash on Windows (Git for Windows); this host is $(uname -s 2>/dev/null)" >&2
     exit 2
@@ -126,7 +132,7 @@ check_tool node "install Node.js LTS: winget install OpenJS.NodeJS.LTS"
 check_tool gh "install GitHub CLI: winget install GitHub.cli, then gh auth login"
 check_tool cygpath "cygpath ships with Git for Windows; run from Git Bash"
 
-# The real jq: the first jq on PATH that is not Firstmate's shim.
+# The real jq: the first jq on PATH that is not a Firstmate shim.
 REAL_JQ=
 IFS=: read -r -a path_dirs <<<"${PATH:-}"
 shim_dir=$(cd "$ROOT/bin/windows" && pwd -P)
@@ -135,6 +141,12 @@ for dir in "${path_dirs[@]}"; do
   resolved=$(cd "$dir" 2>/dev/null && pwd -P) || continue
   [ "$resolved" != "$shim_dir" ] || continue
   for candidate in "$dir/jq.exe" "$dir/jq"; do
+    # Another checkout's bin/windows/jq shim is not the real jq: recording it
+    # in FM_WINDOWS_JQ would make the shim exec itself forever.
+    case "$candidate" in
+      *.exe) ;;
+      *) head -c 512 "$candidate" 2>/dev/null | grep -q 'bin/windows/jq - Git Bash shim' && continue ;;
+    esac
     if [ -f "$candidate" ] && [ -x "$candidate" ]; then
       REAL_JQ=$(cd "${candidate%/*}" && pwd -P)/${candidate##*/}
       break 2

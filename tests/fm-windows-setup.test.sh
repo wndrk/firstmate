@@ -142,7 +142,9 @@ test_conflicting_shell_needs_force() {
 
 test_refuses_off_windows() {
   local rc=0
-  HOME="$TMP_ROOT/unix" bash "$FM/bin/fm-windows-setup.sh" --check >/dev/null 2>&1 || rc=$?
+  # FM_WINDOWS_HOST=0 stands in for a non-Windows host, so this case also
+  # holds when the suite itself runs under Git Bash.
+  FM_WINDOWS_HOST=0 HOME="$TMP_ROOT/unix" bash "$FM/bin/fm-windows-setup.sh" --check >/dev/null 2>&1 || rc=$?
   [ "$rc" = 2 ] || fail "setup off Windows exited $rc, expected 2"
   pass "setup refuses to run off Git Bash on Windows"
 }
@@ -195,6 +197,18 @@ test_explicit_backend_switches_config_backend() {
   pass "config/backend changes only when --backend names another backend"
 }
 
+test_jq_shim_never_runs_another_shim() {
+  local other out
+  other="$TMP_ROOT/other-checkout/bin/windows"
+  mkdir -p "$other" "$TMP_ROOT/realjq"
+  cp "$ROOT/bin/windows/jq" "$other/jq"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "real:%s\n" "$*"' >"$TMP_ROOT/realjq/jq"
+  chmod +x "$other/jq" "$TMP_ROOT/realjq/jq"
+  out=$(FM_WINDOWS_JQ="$other/jq" PATH="$other:$TMP_ROOT/realjq:$PATH" timeout 10 bash "$ROOT/bin/windows/jq" -r .a 2>&1)
+  [ "$out" = 'real:-b -r .a' ] || fail "the jq shim ran another shim instead of the real jq: $out"
+  pass "the jq shim skips other Firstmate shims on PATH and in FM_WINDOWS_JQ"
+}
+
 # The end-to-end probe only runs on the windows-latest workflow; here it must
 # at least parse, so a syntax slip fails on every runner.
 test_windows_probe_parses() {
@@ -214,4 +228,5 @@ fm_test_run \
   test_refuses_off_windows \
   test_hc_backend_sets_herdr_core_shell \
   test_explicit_backend_switches_config_backend \
+  test_jq_shim_never_runs_another_shim \
   test_windows_probe_parses

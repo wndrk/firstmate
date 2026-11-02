@@ -73,7 +73,10 @@ setup_case() {  # <name> -> sets D, FB, HOMEDIR
 # stub. FM_HC_BIN pins the stub so an inherited FM_HC_BIN or an installed
 # herdr-core never wins; CASE_HC_BIN overrides it for binary-resolution cases.
 # HOMETAG is exported so the script can build matching labels.
+# FM_BACKEND_HC_WINDOWS defaults to 0 so the Unix cases keep their Unix
+# expectations when this suite runs under Git Bash; the Windows case sets 1.
 hc_shell() {  # <script>
+  FM_BACKEND_HC_WINDOWS=${FM_BACKEND_HC_WINDOWS:-0} \
   FAKE_HC_DIR=$D PATH="$FB:$PATH" FM_HC_BIN=${CASE_HC_BIN:-$FB/hc} \
     FM_HOME=$HOMEDIR FM_ROOT_OVERRIDE=$HOMEDIR \
     HC_SESSION=fmtest bash -c '
