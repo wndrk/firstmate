@@ -156,6 +156,17 @@ if [ -n "$sock" ]; then
   rc=0
   diag=$(python3 "$ROOT/bin/backends/herdr-eventwait.py" "$sock" 2 "$PANE" 2>&1) || rc=$?
   info eventwait-direct "rc=$rc output=$(printf '%s' "$diag" | tr '\n' ' ' | cut -c1-400)"
+  diag=$(cd "$ROOT/bin/backends" && python3 -c '
+import sys, traceback, json, herdr_transport
+try:
+    s = herdr_transport.connect(sys.argv[1], 5)
+    s.sendall((json.dumps({"id": "d", "method": "session.snapshot", "params": {}}) + "\n").encode())
+    s.settimeout(5)
+    print("connected; first bytes:", s.recv(200)[:200])
+except Exception:
+    traceback.print_exc()
+' "$sock" 2>&1)
+  info transport-direct "$(printf '%s' "$diag" | tr '\n' ' ' | cut -c1-900)"
 fi
 if fm_backend_herdr_events_capable "$SESSION"; then
   pass events-capable "events.subscribe capability gate passes"
@@ -221,7 +232,8 @@ fi
 config_file="$(cygpath -u "$APPDATA")/herdr/config.toml"
 if [ -f "$config_file" ]; then
   cp "$config_file" "$SCRATCH/config.toml.bak"
-  sed -i "s|^default_shell = .*|default_shell = '$(cygpath -w /usr/bin/bash.exe)'|" "$config_file"
+  printf "[terminal]\ndefault_shell = '%s'\nshell_mode = \"login\"\n" "$(cygpath -w /usr/bin/bash.exe)" >"$config_file"
+  info alt-config "$(tr '\n' '|' <"$config_file")"
   h server reload-config >/dev/null 2>&1 || true
   out=$(h tab create --cwd "$ROOT" --label fm-win-usrbash --no-focus 2>&1)
   ALT=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty')
@@ -231,12 +243,18 @@ if [ -f "$config_file" ]; then
     h pane run "$ALT" "sleep 20" >/dev/null 2>&1
     sleep 2
     info alt-busy "$(h pane process-info --pane "$ALT" 2>&1 | tr -d '\n' | cut -c1-900)"
+    # shellcheck disable=SC2009  # Git Bash has no pgrep -W equivalent
+    info alt-ps-busy "$(ps -W 2>/dev/null | grep -iE 'bash|sleep' | tr -s ' ' | tr '\n' ';' | cut -c1-900)"
     h pane send-keys "$ALT" ctrl+c >/dev/null 2>&1
     sleep 1
     mkdir -p "$SCRATCH/alt cwd"
     h pane run "$ALT" "cd '$SCRATCH/alt cwd'" >/dev/null 2>&1
     sleep 1.5
     info alt-cd "$(h pane get "$ALT" 2>&1 | tr -d '\n' | cut -c1-900)"
+    info alt-cd-process "$(h pane process-info --pane "$ALT" 2>&1 | tr -d '\n' | cut -c1-900)"
+    # shellcheck disable=SC2016  # expands inside the pane's shell
+    h pane run "$ALT" 'echo "ALTENV MSYSTEM=$MSYSTEM git=$(command -v git) jq=$(command -v jq)"' >/dev/null 2>&1
+    sleep 1
     info alt-read "$(h pane read "$ALT" --source recent --lines 15 2>&1 | tr '\n' '|' | cut -c1-600)"
   else
     info alt-shell "tab create failed: $out"
