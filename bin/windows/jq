@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# bin/windows/jq - Git Bash shim for a native Windows jq.exe (docs/windows.md).
+#
+# A native jq.exe writes CRLF line endings unless it runs with -b/--binary,
+# and every Firstmate caller splits jq output on LF and compares exact fields,
+# so a stray CR would silently break ids, states, and paths. This shim runs
+# the real jq with -b. bin/fm-windows-setup.sh records the real executable in
+# FM_WINDOWS_JQ so the common path is one exec; without it the shim searches
+# PATH for the next jq that is not this shim.
+set -u
+real=${FM_WINDOWS_JQ:-}
+if [ -z "$real" ] || [ ! -x "$real" ]; then
+  real=
+  self_dir=$(cd "${BASH_SOURCE[0]%/*}" 2>/dev/null && pwd -P) || self_dir=
+  IFS=: read -r -a fm_jq_dirs <<<"${PATH:-}"
+  for dir in "${fm_jq_dirs[@]}"; do
+    [ -n "$dir" ] || continue
+    resolved=$(cd "$dir" 2>/dev/null && pwd -P) || continue
+    [ "$resolved" != "$self_dir" ] || continue
+    for candidate in "$dir/jq.exe" "$dir/jq"; do
+      if [ -f "$candidate" ] && [ -x "$candidate" ]; then
+        real=$candidate
+        break 2
+      fi
+    done
+  done
+fi
+if [ -z "$real" ]; then
+  echo "jq: no jq executable found on PATH besides the Firstmate Windows shim; install jq 1.7 or newer (winget install jqlang.jq)" >&2
+  exit 127
+fi
+exec "$real" -b "$@"

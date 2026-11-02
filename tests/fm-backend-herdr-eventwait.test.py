@@ -83,7 +83,10 @@ class EventWaitReadLineTest(unittest.TestCase):
 
     def test_main_reports_early_stream_closure(self):
         stdout = io.StringIO()
-        with mock.patch.object(READER.socket, "socket", return_value=ClosingStreamSocket()):
+        # Windows Python has no AF_UNIX; these cases exercise the Unix-socket
+        # path, so provide the constant there.
+        with mock.patch.object(READER.socket, "AF_UNIX", 1, create=True), \
+                mock.patch.object(READER.socket, "socket", return_value=ClosingStreamSocket()):
             with mock.patch.object(READER.sys, "stdout", stdout):
                 result = READER.main(["herdr-eventwait.py", "socket", "1", "pane"])
 
@@ -92,14 +95,117 @@ class EventWaitReadLineTest(unittest.TestCase):
 
     def test_main_does_not_signal_readiness_before_valid_ack(self):
         stdout = io.StringIO()
-        with mock.patch.object(
-            READER.socket, "socket", return_value=RejectedSubscriptionSocket()
-        ):
+        with mock.patch.object(READER.socket, "AF_UNIX", 1, create=True), \
+                mock.patch.object(
+                    READER.socket, "socket", return_value=RejectedSubscriptionSocket()
+                ):
             with mock.patch.object(READER.sys, "stdout", stdout):
                 result = READER.main(["herdr-eventwait.py", "socket", "1", "pane"])
 
         self.assertEqual(result, 3)
         self.assertEqual(stdout.getvalue(), "")
+
+
+TRANSPORT = READER.herdr_transport
+
+
+class FakePipeHandle:
+    """Stands in for a Windows named-pipe file handle."""
+
+    def __init__(self, chunks):
+        self.chunks = list(chunks)
+        self.written = b""
+        self.closed = False
+
+    def write(self, data):
+        self.written += data
+
+    def flush(self):
+        pass
+
+    def read(self, _size):
+        return self.chunks.pop(0) if self.chunks else b""
+
+    def close(self):
+        self.closed = True
+
+
+class HerdrTransportTest(unittest.TestCase):
+    def test_unix_paths_stay_valid(self):
+        self.assertTrue(TRANSPORT.valid_path("/tmp/herdr.sock"))
+        self.assertFalse(TRANSPORT.valid_path(""))
+        self.assertFalse(TRANSPORT.valid_path("relative.sock"))
+        self.assertFalse(TRANSPORT.valid_path("/tmp/a\nb"))
+
+    def test_pipe_paths_are_recognized(self):
+        self.assertTrue(TRANSPORT.is_pipe_path("\\\\.\\pipe\\herdr-default"))
+        self.assertTrue(TRANSPORT.is_pipe_path("//./pipe/herdr-default"))
+        self.assertFalse(TRANSPORT.is_pipe_path("/tmp/herdr.sock"))
+
+    def test_windows_accepts_pipe_and_drive_paths(self):
+        with mock.patch.object(TRANSPORT, "WINDOWS", True):
+            self.assertTrue(TRANSPORT.valid_path("\\\\.\\pipe\\herdr-default"))
+            self.assertTrue(TRANSPORT.valid_path("C:\\Users\\me\\herdr.sock"))
+            self.assertFalse(TRANSPORT.valid_path("C:herdr.sock"))
+        with mock.patch.object(TRANSPORT, "WINDOWS", False):
+            self.assertFalse(TRANSPORT.valid_path("\\\\.\\pipe\\herdr-default"))
+
+    def test_pipe_connection_streams_then_reports_close(self):
+        handle = FakePipeHandle([b'{"a":1}\n', b'{"b":2}\n'])
+        conn = TRANSPORT._PipeConnection(handle)
+        conn.sendall(b"request\n")
+        self.assertEqual(handle.written, b"request\n")
+        conn.settimeout(1)
+        line, buf, outcome = READER._read_line(conn, b"", time.monotonic() + 1)
+        self.assertEqual((line, outcome), (b'{"a":1}', "line"))
+        line, buf, outcome = READER._read_line(conn, buf, time.monotonic() + 1)
+        self.assertEqual((line, outcome), (b'{"b":2}', "line"))
+        line, buf, outcome = READER._read_line(conn, buf, time.monotonic() + 1)
+        self.assertEqual(outcome, "closed")
+
+    def test_pipe_connection_times_out_like_a_socket(self):
+        class Blocking(FakePipeHandle):
+            def read(self, _size):
+                time.sleep(5)
+                return b""
+
+        conn = TRANSPORT._PipeConnection(Blocking([]))
+        conn.settimeout(0.05)
+        with self.assertRaises(socket.timeout):
+            conn.recv(1)
+
+    def test_pipe_connection_refuses_write_after_read(self):
+        conn = TRANSPORT._PipeConnection(FakePipeHandle([b"x\n"]))
+        conn.settimeout(1)
+        conn.recv(1)
+        with self.assertRaises(OSError):
+            conn.sendall(b"late\n")
+
+    def test_reported_socket_path_maps_to_herdr_pipe(self):
+        # Herdr 0.9.5 on Windows reports ...\\herdr.sock and serves a pipe
+        # named by that whole path (measured on windows-latest).
+        reported = "C:\\Users\\me\\AppData\\Roaming\\herdr\\sessions\\s\\herdr.sock"
+        want = "\\\\.\\pipe\\" + reported
+        self.assertEqual(TRANSPORT.pipe_name(reported), want)
+        self.assertEqual(TRANSPORT.pipe_name("/c/Users/me/AppData/Roaming/herdr/sessions/s/herdr.sock"), want)
+        self.assertEqual(TRANSPORT.windows_path("/d/a"), "D:\\a")
+
+    def test_windows_connect_prefers_the_pipe_then_falls_back(self):
+        reported = "C:\\h\\herdr.sock"
+        with mock.patch.object(TRANSPORT, "WINDOWS", True), \
+                mock.patch.object(TRANSPORT, "_connect_pipe", return_value="pipe") as pipe, \
+                mock.patch.object(TRANSPORT, "_connect_windows_unix", return_value="unix") as unix, \
+                mock.patch.object(TRANSPORT.socket, "AF_UNIX", None, create=True):
+            self.assertEqual(TRANSPORT.connect(reported, 1), "pipe")
+            pipe.assert_called_once_with("\\\\.\\pipe\\" + reported, 1)
+            unix.assert_not_called()
+            pipe.side_effect = FileNotFoundError(2, "no pipe")
+            self.assertEqual(TRANSPORT.connect(reported, 1), "unix")
+            unix.assert_called_once_with(reported, 1)
+
+    def test_lf_stdout_tolerates_plain_streams(self):
+        with mock.patch.object(TRANSPORT.sys, "stdout", io.StringIO()):
+            TRANSPORT.lf_stdout()
 
 
 if __name__ == "__main__":

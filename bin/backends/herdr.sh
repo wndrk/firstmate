@@ -150,6 +150,47 @@ FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX=".herdr-presentation"
 # projection.
 FM_BACKEND_HERDR_PRESENTATION_CONFIG="herdr-presentation-spaces"
 
+# --- native Windows (Git for Windows / MSYS) ----------------------------------
+#
+# On native Windows Firstmate runs under Git Bash and drives the native
+# herdr.exe (docs/windows.md). Three platform facts shape this adapter there:
+# the control socket is a named pipe rather than an absolute Unix path; a
+# pane's process-info reports Windows process ids with no Unix foreground
+# process group, while Git Bash's `ps` lists MSYS process ids; and herdr.exe
+# reports Windows-form paths (C:\...) that Git Bash spells /c/....
+# FM_BACKEND_HERDR_WINDOWS (1 or 0) overrides detection for tests.
+fm_backend_herdr_windows_host() {
+  case "${FM_BACKEND_HERDR_WINDOWS:-}" in
+    1) return 0 ;;
+    0) return 1 ;;
+  esac
+  case "${OSTYPE:-}" in
+    msys*|cygwin*) return 0 ;;
+  esac
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*) return 0 ;;
+  esac
+  return 1
+}
+
+# fm_backend_herdr_posix_path: print <path> in Git Bash form on Windows (a
+# drive path such as C:\work\repo becomes /c/work/repo); unchanged elsewhere
+# and for anything cygpath cannot convert.
+fm_backend_herdr_posix_path() {  # <path>
+  local path=$1 converted
+  if fm_backend_herdr_windows_host; then
+    case "$path" in
+      [A-Za-z]:[\\/]*|[A-Za-z]:)
+        if command -v cygpath >/dev/null 2>&1 && converted=$(cygpath -u -- "$path" 2>/dev/null) && [ -n "$converted" ]; then
+          printf '%s' "$converted"
+          return 0
+        fi
+        ;;
+    esac
+  fi
+  printf '%s' "$path"
+}
+
 # fm_backend_herdr_presentation_preference <config-dir>: the single owner of
 # config/herdr-presentation-spaces parsing. Echoes exactly one of "off", "on"
 # (a deliberate opt-in, honored even below the version floor), or "default"
@@ -814,7 +855,11 @@ fm_backend_herdr_presentation_lock_namespace_valid() {
   expected_uid=$(id -u 2>/dev/null) || return 1
   owner=$(fm_backend_herdr_presentation_lock_namespace_uid "$dir") || return 1
   mode=$(fm_backend_herdr_presentation_lock_namespace_mode "$dir") || return 1
-  [ "$owner" = "$expected_uid" ] && [ "$mode" = 700 ]
+  [ "$owner" = "$expected_uid" ] || return 1
+  # Git for Windows mounts NTFS with noacl, so mkdir -m 700 cannot be
+  # observed back as 700; the per-uid name and the owner check remain.
+  fm_backend_herdr_windows_host && return 0
+  [ "$mode" = 700 ]
 }
 
 # Resolve the one verified running named-session socket path as an absolute
@@ -832,6 +877,17 @@ fm_backend_herdr_presentation_lock_namespace_valid() {
 fm_backend_herdr_canonical_socket_path() {  # <socket-path>
   local socket=$1 sock_dir sock_base
   [ -n "$socket" ] || return 1
+  if fm_backend_herdr_windows_host; then
+    # A named pipe has no directory to canonicalize: its literal name is its
+    # identity. A drive path is compared in its Git Bash spelling.
+    case "$socket" in
+      \\\\.\\pipe\\*|//./pipe/*)
+        printf '%s' "$socket"
+        return 0
+        ;;
+    esac
+    socket=$(fm_backend_herdr_posix_path "$socket")
+  fi
   case "$socket" in
     /*) ;;
     *) return 1 ;;
@@ -1343,6 +1399,10 @@ fm_backend_herdr_death_close_pane() {  # <session> <pane-id> <shell-pid> [guard-
   case "$shell_pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
+  if fm_backend_herdr_windows_host; then
+    fm_backend_herdr_death_close_pane_windows "$@"
+    return $?
+  fi
   command -v "$ps_bin" >/dev/null 2>&1 || return 1
   max_attempts=${FM_BACKEND_HERDR_DEATH_CLOSE_POLLS:-40}
   fm_backend_herdr_pid_is_bare_shell "$ps_bin" "$shell_pid" || return 1
@@ -1363,6 +1423,30 @@ fm_backend_herdr_death_close_pane() {  # <session> <pane-id> <shell-pid> [guard-
   fm_backend_herdr_pid_is_bare_shell "$ps_bin" "$shell_pid" || return 1
   [ -z "$guard_tab" ] || fm_backend_herdr_projection_target_tab_mutation_allowed "$session" "$guard_tab" || return 1
   kill -KILL "$shell_pid" 2>/dev/null || true
+  attempt=0
+  while [ "$attempt" -lt "$max_attempts" ]; do
+    presence=$(fm_backend_herdr_pane_presence_state "$session" "$pane_id")
+    [ "$presence" = dead ] && return 0
+    sleep 0.05
+    attempt=$((attempt + 1))
+  done
+  return 1
+}
+
+# fm_backend_herdr_death_close_pane_windows: the Windows form of the
+# pane-death close. Git Bash cannot signal the Windows process id Herdr
+# reports, so the proved lone idle shell is asked to exit through its own
+# input instead: a fresh strict sample must still name the same shell pid,
+# then `exit` is submitted to that pane and the pane must disappear. No
+# forced escalation exists; an unconfirmed close returns 1 so the caller
+# keeps its plain-close fallback.
+fm_backend_herdr_death_close_pane_windows() {  # <session> <pane-id> <shell-pid> [guard-tab-id]
+  local session=$1 pane_id=$2 shell_pid=$3 guard_tab=${4:-} attempt max_attempts presence resampled_pid
+  max_attempts=${FM_BACKEND_HERDR_DEATH_CLOSE_POLLS:-40}
+  resampled_pid=$(fm_backend_herdr_pane_idle_shell_sample "$session" "$pane_id") || return 1
+  [ "$resampled_pid" = "$shell_pid" ] || return 1
+  [ -z "$guard_tab" ] || fm_backend_herdr_projection_target_tab_mutation_allowed "$session" "$guard_tab" || return 1
+  fm_backend_herdr_cli "$session" pane run "$pane_id" exit >/dev/null 2>&1 || return 1
   attempt=0
   while [ "$attempt" -lt "$max_attempts" ]; do
     presence=$(fm_backend_herdr_pane_presence_state "$session" "$pane_id")
@@ -1425,6 +1509,10 @@ fm_backend_herdr_pane_idle_shell_sample() {  # <session> <pane-id>
     .result.type == "pane_process_info"
     and .result.process_info.pane_id == $pane
   ' >/dev/null 2>&1 || return 1
+  if fm_backend_herdr_windows_host; then
+    fm_backend_herdr_pane_idle_shell_sample_windows "$info"
+    return $?
+  fi
   shell_pid=$(printf '%s' "$info" | jq -er \
     '.result.process_info.shell_pid | select(type == "number" and . > 1) | floor' 2>/dev/null) || return 1
   foreground_pgid=$(printf '%s' "$info" | jq -er \
@@ -1460,6 +1548,111 @@ fm_backend_herdr_pane_idle_shell_sample() {  # <session> <pane-id>
   stat=$("$ps_bin" -p "$shell_pid" -o stat= 2>/dev/null | tr -d '[:space:]') || return 1
   case "$stat" in S*|I*) ;; *) return 1 ;; esac
   printf '%s\n' "$shell_pid"
+}
+
+# fm_backend_herdr_pane_idle_shell_sample_windows: the Windows form of one
+# idle-shell sample, given the pane's process-info JSON. Windows has no Unix
+# foreground process group, and Herdr 0.9.5 lists only the pane's shell as its
+# foreground process even while that shell runs a command (measured on
+# windows-latest: `sleep 20` under Git's usr\bin\bash.exe left process-info
+# unchanged). So Herdr proves the shape (one foreground process, it IS the
+# shell pid, a recognized shell once .exe is dropped) and Git Bash's own
+# process table proves the idleness: fm_backend_herdr_windows_shell_quiet.
+fm_backend_herdr_pane_idle_shell_sample_windows() {  # <process-info-json>
+  local info=$1 shell_pid count process_pid name argv0 shell_name
+  shell_pid=$(printf '%s' "$info" | jq -er \
+    '.result.process_info.shell_pid | select(type == "number" and . > 1) | floor' 2>/dev/null) || return 1
+  count=$(printf '%s' "$info" | jq -er \
+    '.result.process_info.foreground_processes | select(type == "array") | length' 2>/dev/null) || return 1
+  [ "$count" -eq 1 ] || return 1
+  process_pid=$(printf '%s' "$info" | jq -er \
+    '.result.process_info.foreground_processes[0].pid | select(type == "number") | floor' 2>/dev/null) || return 1
+  [ "$process_pid" = "$shell_pid" ] || return 1
+  name=$(printf '%s' "$info" | jq -er \
+    '.result.process_info.foreground_processes[0].name | select(type == "string" and length > 0)' 2>/dev/null) || return 1
+  argv0=$(printf '%s' "$info" | jq -er '
+    .result.process_info.foreground_processes[0] as $process
+    | ($process.argv0 // $process.argv[0] // $process.name)
+    | select(type == "string" and length > 0)
+  ' 2>/dev/null) || return 1
+  shell_name=${name//\\//}
+  shell_name=${shell_name##*/}
+  shell_name=${shell_name%.[eE][xX][eE]}
+  argv0=${argv0#-}
+  argv0=${argv0//\\//}
+  argv0=${argv0##*/}
+  argv0=${argv0%.[eE][xX][eE]}
+  [ "$argv0" = "$shell_name" ] || return 1
+  case "$shell_name" in sh|bash|zsh|dash|ksh|fish) ;; *) return 1 ;; esac
+  fm_backend_herdr_windows_shell_quiet "$shell_pid" || return 1
+  printf '%s\n' "$shell_pid"
+}
+
+# fm_backend_herdr_windows_ps_rows: Git Bash's process table as
+# "<pid> <ppid> <winpid> <tty> <msys> <command>" lines. Cygwin's `ps -W`
+# prints PID PPID PGID WINPID TTY UID STIME COMMAND, with an optional
+# leading status letter (I, S, O) that is dropped here. <msys> is 1 for an
+# MSYS process and 0 for a Windows-only row, which `ps -W` lists with PPID
+# and PGID 0 and a synthetic PID (Git's bin\bash.exe wrapper is one).
+fm_backend_herdr_windows_ps_rows() {
+  local ps_bin=${FM_HERDR_PS_BIN:-ps}
+  command -v "$ps_bin" >/dev/null 2>&1 || return 1
+  "$ps_bin" -W 2>/dev/null | awk '
+    NR == 1 { next }
+    {
+      if ($1 !~ /^[0-9]+$/) { $1 = ""; $0 = $0 }
+      if (NF < 8) next
+      command = $8
+      for (i = 9; i <= NF; i++) command = command " " $i
+      print $1, $2, $4, $5, ($3 == 0 ? 0 : 1), command
+    }'
+}
+
+# fm_backend_herdr_windows_shell_quiet: true when the MSYS bash whose Windows
+# pid is <winpid> runs nothing. Herdr reports the Windows pid; `ps -W` maps it
+# to the MSYS pid and console (consN). The shell is busy when any MSYS
+# process names it as parent, or when any other process holds its console:
+# a native program such as treehouse.exe breaks the MSYS parent chain, but
+# the bash it starts still shares the pane's console. A shell absent from the
+# table (Git's bin\bash.exe wrapper, which hides the real bash one level
+# down) is never proved quiet.
+fm_backend_herdr_windows_shell_quiet() {  # <winpid>
+  local winpid=$1 rows
+  rows=$(fm_backend_herdr_windows_ps_rows) || return 1
+  printf '%s\n' "$rows" | awk -v winpid="$winpid" '
+    { pid[NR] = $1; ppid[NR] = $2; win[NR] = $3; tty[NR] = $4 }
+    $3 == winpid && $5 == 1 { shell = $1; console = $4; found++ }
+    END {
+      if (found != 1) exit 1
+      for (i = 1; i <= NR; i++) {
+        if (pid[i] == shell) continue
+        if (ppid[i] == shell) exit 1
+        if (console != "?" && tty[i] == console) exit 1
+      }
+      exit 0
+    }'
+}
+
+# fm_backend_herdr_windows_pane_cwd: the cwd, in Git Bash form, of the newest
+# bash on the console of the MSYS shell whose Windows pid is <winpid>. That is
+# the pane shell itself, or the subshell `treehouse get` started in the
+# leased worktree. Cygwin publishes each process cwd at /proc/<pid>/cwd.
+fm_backend_herdr_windows_pane_cwd() {  # <winpid>
+  local winpid=$1 rows newest proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
+  rows=$(fm_backend_herdr_windows_ps_rows) || return 1
+  newest=$(printf '%s\n' "$rows" | awk -v winpid="$winpid" '
+    { pid[NR] = $1; win[NR] = $3; tty[NR] = $4; cmd[NR] = $6 }
+    $3 == winpid && $5 == 1 { shell = $1; console = $4 }
+    END {
+      if (shell == "") exit 1
+      best = shell
+      if (console != "?")
+        for (i = 1; i <= NR; i++)
+          if (tty[i] == console && cmd[i] ~ /(^|\/)bash(\.exe)?$/ && pid[i] + 0 > best + 0) best = pid[i]
+      print best
+    }') || return 1
+  [ -n "$newest" ] || return 1
+  readlink "$proc_root/$newest/cwd" 2>/dev/null
 }
 
 # fm_backend_herdr_projection_order_best_effort: place the exact workspace id
@@ -3159,8 +3352,22 @@ fm_backend_herdr_target_ready() {  # <target>
 # worktree subshell - confirmed live against a real treehouse acquisition.
 fm_backend_herdr_current_path() {  # <target>
   fm_backend_herdr_target_ready "$1" || return 0
-  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane get "$FM_BACKEND_HERDR_PANE" 2>/dev/null \
-    | jq -r '.result.pane.foreground_cwd // empty' 2>/dev/null
+  local cwd shell_pid
+  if fm_backend_herdr_windows_host; then
+    # Herdr 0.9.5 on Windows reports no foreground_cwd, and its pane cwd
+    # follows only the pane shell, never the subshell `treehouse get` opens,
+    # so the cwd is read from Git Bash's process table instead.
+    shell_pid=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane process-info --pane "$FM_BACKEND_HERDR_PANE" 2>/dev/null \
+      | jq -er '.result.process_info.shell_pid | select(type == "number") | floor' 2>/dev/null) || shell_pid=
+    if [ -n "$shell_pid" ] && cwd=$(fm_backend_herdr_windows_pane_cwd "$shell_pid") && [ -n "$cwd" ]; then
+      printf '%s\n' "$cwd"
+      return 0
+    fi
+  fi
+  cwd=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane get "$FM_BACKEND_HERDR_PANE" 2>/dev/null \
+    | jq -r '.result.pane.foreground_cwd // empty' 2>/dev/null) || return 0
+  [ -n "$cwd" ] || return 0
+  printf '%s\n' "$(fm_backend_herdr_posix_path "$cwd")"
 }
 
 # fm_backend_herdr_send_text_line: send one line of TEXT then submit,

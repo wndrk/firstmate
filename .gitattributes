@@ -1,2 +1,9 @@
+# Native Windows checkouts (Git for Windows defaults to core.autocrlf=true)
+# must keep every text file LF: Git Bash runs the extensionless shims in
+# bin/windows/, Python helpers stream LF-framed lines to bash, and bash reads
+# Markdown, JSON, jq, and TOML files line by line (docs/windows.md).
+* text=auto eol=lf
 # Bash parses shell scripts with LF line endings on every supported platform.
 *.sh text eol=lf
+# Captured terminal fixtures keep their recorded bytes, CRLF included.
+tests/fixtures/**/*.vt -text

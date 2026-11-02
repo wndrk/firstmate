@@ -22,9 +22,13 @@ Exit status:
 """
 
 import json
+import os
 import socket
 import sys
 import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import herdr_transport  # noqa: E402  (sibling module: platform-native socket or named pipe)
 
 
 CONNECT_TIMEOUT = 5.0
@@ -57,7 +61,7 @@ def main(argv):
     if len(argv) != 4:
         return 2
     socket_path, workspace_id, raw_index = argv[1:]
-    if not socket_path.startswith("/") or not workspace_id:
+    if not herdr_transport.valid_path(socket_path) or not workspace_id:
         return 2
     if any(char in workspace_id for char in "\t\r\n"):
         return 2
@@ -69,9 +73,7 @@ def main(argv):
         return 2
 
     try:
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.settimeout(CONNECT_TIMEOUT)
-        sock.connect(socket_path)
+        sock = herdr_transport.connect(socket_path, CONNECT_TIMEOUT)
     except OSError:
         return 2
 
