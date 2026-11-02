@@ -110,6 +110,15 @@ Firstmate therefore reads what that shell runs, and which folder it is in, from 
 | Presentation lock directory | Must read back as mode `0700` | Owner check only, because Git Bash mounts NTFS with `noacl` |
 | Symlink locks | Native | `MSYS=winsymlinks:sys` makes `ln -s` create real links instead of copies |
 
+## Primary session identity
+
+Firstmate's session lock must know which harness process is the primary. On Git Bash the parent link from a shell to its native Windows harness is severed, so the harness publishes its own Windows pid and [`bin/fm-session-lock-lib.sh`](../bin/fm-session-lock-lib.sh) confirms it against `ps -W` before trusting it:
+
+- **Claude Code** publishes `CLAUDE_PID` with `CLAUDE_CODE_SESSION_ID`; `claude.exe` is recognized by its path.
+- **Pi** runs as `node.exe` on Pi's bundled `pi-coding-agent/.../cli.js`. Firstmate's Pi extensions publish that process's pid as `FM_PI_PID`, and the lock library reads the script from the Windows command line (one PowerShell `Win32_Process` lookup per process, whose verdict is cached). So the Pi primary is identified only once Pi has loaded the Firstmate extensions from `.pi/extensions/` (approve Pi project trust for the checkout).
+
+Any other harness is reported as unidentified and the session stays read-only.
+
 ## Limits
 
 - With the Herdr app, a harness that runs as `node.exe` plus a script (an npm-installed Claude Code, for example) reads as an unknown program rather than a live agent, so recovery stays conservative; Claude Code's native installer (`claude.exe`) is recognized.

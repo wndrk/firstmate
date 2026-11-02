@@ -643,7 +643,20 @@ const cleanupOnProcessExit = () => {
 };
 process.once("exit", cleanupOnProcessExit);
 
+// Windows session identity. Pi on native Windows is a plain node.exe that no
+// Git Bash ancestry walk can reach, so this process publishes its own Windows
+// pid as FM_PI_PID into process.env, which Pi's shell tool hands to every
+// command it runs. bin/fm-session-lock-lib.sh (FM_WIN_HARNESS_PID_VARS) confirms
+// that claim against the Windows process table and the script node runs before
+// trusting it. Kept identical in fm-primary-pi-watch.ts and
+// fm-primary-turnend-guard.ts so either one loaded alone identifies the session.
+function publishWindowsSessionPid(): void {
+  if (process.platform !== "win32") return;
+  process.env.FM_PI_PID = String(process.pid);
+}
+
 export default function (pi: ExtensionAPI) {
+  publishWindowsSessionPid();
   let generation = createGeneration();
   activateGeneration(generation);
 

@@ -21,6 +21,7 @@ on:
       - 'bin/fm-windows-proc-lib.sh'
       - 'bin/fm-agent-process-lib.sh'
       - 'bin/backends/hc.sh'
+      - 'bin/fm-session-lock-lib.sh'
       - 'tests/fm-backend-herdr-eventwait.test.py'
   pull_request:
     paths:
@@ -35,6 +36,7 @@ on:
       - 'bin/fm-windows-proc-lib.sh'
       - 'bin/fm-agent-process-lib.sh'
       - 'bin/backends/hc.sh'
+      - 'bin/fm-session-lock-lib.sh'
       - 'tests/fm-backend-herdr-eventwait.test.py'
   workflow_dispatch:
 
@@ -109,6 +111,36 @@ jobs:
           # shellcheck source=/dev/null
           . ~/.bashrc
           bin/fm-windows-hc-probe.sh
+
+      - name: Pi primary identity from a real node process
+        run: |
+          set -u
+          # Pi runs on Windows as node.exe on Pi's bundled cli.js; the session
+          # lock must recognize that process from its Windows command line and
+          # refuse a node process running any other script.
+          dir=$(mktemp -d)
+          pkg="$dir/node_modules/@earendil-works/pi-coding-agent/dist/bundle"
+          mkdir -p "$pkg" "$dir/other"
+          printf 'setInterval(() => {}, 1000);\n' > "$pkg/cli.js"
+          cp "$pkg/cli.js" "$dir/other/cli.js"
+          node "$(cygpath -w "$pkg/cli.js")" & pi=$!
+          node "$(cygpath -w "$dir/other/cli.js")" & other=$!
+          sleep 3
+          pi_win=$(cat "/proc/$pi/winpid")
+          other_win=$(cat "/proc/$other/winpid")
+          export FM_WIN_CMDLINE_CACHE_DIR="$dir/cache"
+          # shellcheck source=/dev/null
+          . bin/fm-session-lock-lib.sh
+          rc=0
+          got=$(FM_PI_PID=$pi_win fm_harness_ancestry_pid) || got=
+          echo "Pi engine $pi_win resolved as '$got'"
+          [ "$got" = "win:$pi_win" ] || { echo "::error::the Pi engine was not identified"; rc=1; }
+          fm_harness_pid_alive "win:$pi_win" || { echo "::error::the Pi engine read as dead"; rc=1; }
+          if FM_PI_PID=$other_win fm_harness_ancestry_pid; then
+            echo "::error::an unrelated node process was identified as Pi"; rc=1
+          fi
+          kill "$pi" "$other" 2>/dev/null || true
+          exit "$rc"
 
       - name: Existing hc adapter suite (informational)
         continue-on-error: true

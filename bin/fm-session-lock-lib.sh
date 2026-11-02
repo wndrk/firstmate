@@ -201,10 +201,10 @@ fm_win_normalize_command() {  # <windows path>
   printf '%s' "${path%.exe}"
 }
 
-# Print the normalized executable path of live Windows process $1, or return 1.
+# Print the raw `ps -W` row of live Windows process $1, or return 1.
 # Presence in `ps -W` is also this bridge's liveness test, because kill -0 cannot
 # answer that question across the namespace boundary.
-fm_win_command() {  # <winpid>
+fm_win_row() {  # <winpid>
   local winpid=$1 table out
   case "$winpid" in
     ''|*[!0-9]*) return 2 ;;
@@ -216,9 +216,135 @@ fm_win_command() {  # <winpid>
     *WINPID*) ;;
     *) return 2 ;;
   esac
-  out=$(printf '%s\n' "$table" | awk -v w="$winpid" '$4 == w { for (i = 8; i <= NF; i++) printf "%s%s", (i > 8 ? " " : ""), $i; exit }')
+  out=$(printf '%s\n' "$table" | awk -v w="$winpid" '$4 == w { print; exit }')
   [ -n "$out" ] || return 1
-  fm_win_normalize_command "$out"
+  printf '%s' "$out"
+}
+
+# Print the normalized executable path of `ps -W` row $1.
+fm_win_row_command() {  # <row>
+  fm_win_normalize_command "$(printf '%s\n' "$1" | awk '{ for (i = 8; i <= NF; i++) printf "%s%s", (i > 8 ? " " : ""), $i; exit }')"
+}
+
+# Print the normalized executable path of live Windows process $1, or return 1
+# (gone) or 2 (process table unreadable).
+fm_win_command() {  # <winpid>
+  local row
+  row=$(fm_win_row "$1") || return $?
+  fm_win_row_command "$row"
+}
+
+# --- interpreter-hosted harnesses on Windows ----------------------------------
+#
+# Pi runs on Windows as a plain node.exe: its launcher (~/.pi/agent/bin/pi ->
+# pi-launcher.js) re-executes node on the bundled
+# .../pi-coding-agent/dist/bundle/cli.js. Node cannot rename a Windows process,
+# so the `ps -W` row says only node.exe and the executable path above identifies
+# nothing. Cygwin publishes no /proc entry for a native process either, so the
+# script node runs is read from the Windows command line (Win32_Process).
+#
+# That lookup starts PowerShell, which is slow, so its VERDICT (never the command
+# line, which can carry a prompt) is cached per process. The key is the whole
+# `ps -W` row, start time included, so a reused Windows pid is a new key and is
+# judged afresh. FM_WIN_CMDLINE_BIN replaces powershell.exe for tests and
+# FM_WIN_CMDLINE_CACHE_DIR moves the cache.
+
+# Print the Windows command line of process $1, or return 1.
+fm_win_command_line() {  # <winpid>
+  local winpid=$1 bin=${FM_WIN_CMDLINE_BIN:-powershell.exe} out
+  case "$winpid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  command -v "$bin" >/dev/null 2>&1 || return 1
+  out=$(MSYS2_ARG_CONV_EXCL='*' MSYS_NO_PATHCONV=1 "$bin" -NoProfile -NonInteractive -Command \
+    "(Get-CimInstance Win32_Process -Filter 'ProcessId=$winpid').CommandLine" 2>/dev/null | tr -d '\r') || return 1
+  [ -n "$out" ] || return 1
+  printf '%s' "$out"
+}
+
+# Print the script an interpreter command line runs: the first argument after
+# the interpreter that is not an option. Windows quoting is "..." only.
+fm_win_script_arg() {  # <command line>
+  local rest=$1 tok n=0
+  while :; do
+    rest=${rest#"${rest%%[! ]*}"}
+    [ -n "$rest" ] || return 1
+    if [ "${rest:0:1}" = '"' ]; then
+      rest=${rest:1}
+      tok=${rest%%\"*}
+      case "$rest" in
+        *\"*) rest=${rest#*\"} ;;
+        *) rest='' ;;
+      esac
+    else
+      tok=${rest%% *}
+      rest=${rest#"$tok"}
+    fi
+    n=$((n + 1))
+    [ "$n" -gt 1 ] || continue
+    case "$tok" in -*) continue ;; esac
+    printf '%s' "$tok"
+    return 0
+  done
+}
+
+# Print the harness name of script path $1 run by an interpreter, or return 1.
+# Whole path components only, as everywhere else in this file: Pi's package
+# directory pi-coding-agent, or an exact harness component.
+fm_win_script_harness() {  # <script path>
+  local script
+  script=$(fm_win_normalize_command "$1")
+  [ -n "$script" ] || return 1
+  case "/$script/" in
+    */pi-coding-agent/*) printf 'pi'; return 0 ;;
+  esac
+  fm_harness_path_name "$script"
+}
+
+# Print the harness name an interpreter process (`ps -W` row $2, Windows pid
+# $1) runs, or return 1. Cached per row as described above.
+fm_win_interpreter_harness() {  # <winpid> <row>
+  local winpid=$1 row=$2 dir key file verdict cmdline script tmp
+  dir=${FM_WIN_CMDLINE_CACHE_DIR:-${TMPDIR:-/tmp}/fm-win-cmdline-$(id -u 2>/dev/null || printf 0)}
+  key=$(printf '%s' "$row" | cksum | awk '{ print $1 "-" $2 }')
+  file="$dir/$winpid-$key"
+  if [ -f "$file" ] && [ ! -L "$file" ]; then
+    verdict=$(head -n 1 "$file" 2>/dev/null)
+  else
+    cmdline=$(fm_win_command_line "$winpid") || return 1
+    verdict=-
+    if script=$(fm_win_script_arg "$cmdline"); then
+      verdict=$(fm_win_script_harness "$script") || verdict=-
+    fi
+    if mkdir -p "$dir" 2>/dev/null; then
+      tmp="$file.tmp.$$"
+      if ! { printf '%s\n' "$verdict" > "$tmp" && mv -f "$tmp" "$file"; } 2>/dev/null; then
+        rm -f "$tmp" 2>/dev/null
+      fi
+    fi
+  fi
+  case "$verdict" in
+    ''|-) return 1 ;;
+  esac
+  printf '%s' "$verdict"
+}
+
+# True when live Windows process $1 is a verified harness: by its executable
+# path, or, for a node or bun interpreter, by the script it runs. Sets
+# FM_HARNESS_IS_CLAUDE like fm_harness_process_matches.
+fm_win_harness_matches() {  # <winpid>
+  local winpid=$1 row comm name
+  FM_HARNESS_IS_CLAUDE=0
+  row=$(fm_win_row "$winpid") || return 1
+  comm=$(fm_win_row_command "$row")
+  fm_harness_process_matches "$comm" "$comm" && return 0
+  case "${comm##*/}" in
+    node|bun) ;;
+    *) return 1 ;;
+  esac
+  name=$(fm_win_interpreter_harness "$winpid" "$row") || return 1
+  [ "$name" != claude ] || FM_HARNESS_IS_CLAUDE=1
+  return 0
 }
 
 # Environment variables through which a verified harness publishes the pid of
@@ -244,7 +370,13 @@ fm_win_command() {  # <winpid>
 # same pid refreshes it as on POSIX. A non-Claude primary hand-started from a
 # Claude pane inherits both values and still resolves as that Claude session; no
 # environment signal tells the two apart there.
-FM_WIN_HARNESS_PID_VARS=(CLAUDE_PID)
+#
+# FM_PI_PID is published by Firstmate's own Pi extensions
+# (fm-primary-turnend-guard.ts and fm-primary-pi-watch.ts) into the environment of every
+# shell Pi starts: the Windows pid of the node process running Pi's cli.js,
+# which is also the pid the extensions record in their load markers. It carries
+# the same inheritance limitation as CLAUDE_PID.
+FM_WIN_HARNESS_PID_VARS=(CLAUDE_PID FM_PI_PID)
 
 # Print this session's harness as one tagged Windows pid, or return 1.
 #
@@ -255,7 +387,7 @@ FM_WIN_HARNESS_PID_VARS=(CLAUDE_PID)
 # malformed, stale, or naming a non-harness process is discarded rather than
 # used, so a wrong or recycled pid fails closed instead of binding the lock.
 fm_win_harness_ancestry_pids() {
-  local var winpid comm
+  local var winpid
   for var in "${FM_WIN_HARNESS_PID_VARS[@]}"; do
     winpid=${!var:-}
     case "$winpid" in
@@ -264,8 +396,7 @@ fm_win_harness_ancestry_pids() {
     if [ "$var" = CLAUDE_PID ]; then
       case "${CLAUDE_CODE_SESSION_ID:-}" in ''|*$'\n'*|*$'\r'*) continue ;; esac
     fi
-    comm=$(fm_win_command "$winpid") || continue
-    fm_harness_process_matches "$comm" "$comm" || continue
+    fm_win_harness_matches "$winpid" || continue
     printf '%s%s\n' "$FM_WIN_PID_PREFIX" "$winpid"
     return 0
   done
@@ -363,8 +494,7 @@ EOF
 fm_harness_pid_alive() {
   local pid=$1 comm args winpid
   if winpid=$(fm_win_untag_pid "$pid"); then
-    comm=$(fm_win_command "$winpid") || return 1
-    fm_harness_process_matches "$comm" "$comm"
+    fm_win_harness_matches "$winpid"
     return
   fi
   kill -0 "$pid" 2>/dev/null || return 1
