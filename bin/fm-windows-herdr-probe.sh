@@ -114,7 +114,11 @@ else
 fi
 h pane run "$PANE" "sleep 20" >/dev/null 2>&1
 sleep 2
-info process-info-busy "$(h pane process-info --pane "$PANE" 2>&1 | tr -d '\n' | cut -c1-600)"
+info process-info-busy "$(h pane process-info --pane "$PANE" 2>&1 | tr -d '\n' | cut -c1-900)"
+info pane-get-busy "$(h pane get "$PANE" 2>&1 | tr -d '\n' | cut -c1-900)"
+info agent-get-busy "$(h agent get "$PANE" 2>&1 | tr -d '\n' | cut -c1-400)"
+# shellcheck disable=SC2009  # Git Bash has no pgrep -W equivalent
+info ps-busy "$(ps -W 2>/dev/null | grep -iE 'bash|sleep' | tr -s ' ' | tr '\n' ';' | cut -c1-900)"
 if FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=3 fm_backend_herdr_pane_idle_shell_pid "$SESSION" "$PANE" >/dev/null; then
   fail busy-proof "a pane running 'sleep 20' was wrongly proved idle"
 else
@@ -128,6 +132,8 @@ sleep 1
 mkdir -p "$SCRATCH/cwd probe"
 h pane run "$PANE" "cd '$SCRATCH/cwd probe'" >/dev/null 2>&1
 sleep 1.5
+info pane-get-cd "$(h pane get "$PANE" 2>&1 | tr -d '\n' | cut -c1-900)"
+info process-info-cd "$(h pane process-info --pane "$PANE" 2>&1 | tr -d '\n' | cut -c1-900)"
 cwd=$(fm_backend_herdr_current_path "$SESSION:$PANE")
 want=$(cd "$SCRATCH/cwd probe" && pwd -P)
 got=$(cd "$cwd" 2>/dev/null && pwd -P)
@@ -145,6 +151,11 @@ if canon=$(fm_backend_herdr_canonical_socket_path "$sock"); then
   pass socket-path "canonical form: $canon"
 else
   fail socket-path "canonical socket path refused '$sock'"
+fi
+if [ -n "$sock" ]; then
+  rc=0
+  diag=$(python3 "$ROOT/bin/backends/herdr-eventwait.py" "$sock" 2 "$PANE" 2>&1) || rc=$?
+  info eventwait-direct "rc=$rc output=$(printf '%s' "$diag" | tr '\n' ' ' | cut -c1-400)"
 fi
 if fm_backend_herdr_events_capable "$SESSION"; then
   pass events-capable "events.subscribe capability gate passes"
@@ -203,6 +214,34 @@ if [ -n "$SPLIT" ] && pid=$(fm_backend_herdr_pane_idle_shell_pid "$SESSION" "$SP
   fi
 else
   fail death-close "could not create and prove an idle split pane: $out"
+fi
+
+# --- diagnostics: Git's usr\bin\bash.exe without the bin\bash.exe wrapper ---
+
+config_file="$(cygpath -u "$APPDATA")/herdr/config.toml"
+if [ -f "$config_file" ]; then
+  cp "$config_file" "$SCRATCH/config.toml.bak"
+  sed -i "s|^default_shell = .*|default_shell = '$(cygpath -w /usr/bin/bash.exe)'|" "$config_file"
+  h server reload-config >/dev/null 2>&1 || true
+  out=$(h tab create --cwd "$ROOT" --label fm-win-usrbash --no-focus 2>&1)
+  ALT=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty')
+  if [ -n "$ALT" ]; then
+    sleep 2
+    info alt-idle "$(h pane process-info --pane "$ALT" 2>&1 | tr -d '\n' | cut -c1-900)"
+    h pane run "$ALT" "sleep 20" >/dev/null 2>&1
+    sleep 2
+    info alt-busy "$(h pane process-info --pane "$ALT" 2>&1 | tr -d '\n' | cut -c1-900)"
+    h pane send-keys "$ALT" ctrl+c >/dev/null 2>&1
+    sleep 1
+    mkdir -p "$SCRATCH/alt cwd"
+    h pane run "$ALT" "cd '$SCRATCH/alt cwd'" >/dev/null 2>&1
+    sleep 1.5
+    info alt-cd "$(h pane get "$ALT" 2>&1 | tr -d '\n' | cut -c1-900)"
+    info alt-read "$(h pane read "$ALT" --source recent --lines 15 2>&1 | tr '\n' '|' | cut -c1-600)"
+  else
+    info alt-shell "tab create failed: $out"
+  fi
+  cp "$SCRATCH/config.toml.bak" "$config_file"
 fi
 
 echo

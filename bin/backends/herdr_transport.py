@@ -1,8 +1,11 @@
 """Platform-native transport for Herdr's local control socket.
 
-Herdr speaks newline-delimited JSON over a Unix domain socket on macOS and
-Linux, and over a named pipe on native Windows (herdr.dev socket API: "On
-Unix, that socket is a Unix domain socket. On Windows, it is a named pipe.").
+Herdr speaks newline-delimited JSON over a Unix domain socket. On native
+Windows, Herdr 0.9.5 reports an AF_UNIX socket file under
+%APPDATA%\\herdr\\sessions\\<name>\\herdr.sock (measured on windows-latest),
+which CPython cannot open through socket.AF_UNIX there, and its docs also
+describe a named pipe; both Windows forms are handled here.
+
 The raw-socket helpers in this directory (herdr-eventwait.py,
 herdr-agent-view.py, herdr-workspace-move.py) share this one module so each
 keeps its own wire protocol and exit-status contract while the transport
@@ -31,6 +34,7 @@ WINDOWS = os.name == "nt"
 _PIPE_PREFIXES = ("\\\\.\\pipe\\", "//./pipe/")
 _PIPE_BUSY_RETRY = 0.05
 _READ_CHUNK = 65536
+_WINDOWS_AF_UNIX = 1
 
 
 def is_pipe_path(path):
@@ -115,12 +119,51 @@ def _connect_pipe(path, timeout):
             time.sleep(_PIPE_BUSY_RETRY)
 
 
+def _connect_windows_unix(path, timeout):
+    """Connect to a Windows AF_UNIX socket file. Herdr on Windows serves its
+    control socket as an AF_UNIX socket file (session list reports
+    ...\\herdr\\sessions\\<name>\\herdr.sock), but CPython on Windows exposes
+    no socket.AF_UNIX. Winsock itself supports AF_UNIX (Windows 10 1803+), so
+    the socket is created and connected through ws2_32 and then adopted as a
+    regular socket object, whose recv/sendall/settimeout need no address
+    family support."""
+    import ctypes
+
+    ws2 = ctypes.WinDLL("ws2_32", use_last_error=True)
+    ws2.socket.restype = ctypes.c_size_t
+    ws2.socket.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int]
+    ws2.connect.restype = ctypes.c_int
+    ws2.connect.argtypes = [ctypes.c_size_t, ctypes.c_void_p, ctypes.c_int]
+    ws2.closesocket.argtypes = [ctypes.c_size_t]
+    ws2.WSAGetLastError.restype = ctypes.c_int
+
+    class SockaddrUn(ctypes.Structure):
+        _fields_ = [("sun_family", ctypes.c_ushort), ("sun_path", ctypes.c_char * 108)]
+
+    encoded = path.encode("utf-8")
+    if len(encoded) >= 108:
+        raise OSError("herdr socket path is too long for AF_UNIX")
+    handle = ws2.socket(_WINDOWS_AF_UNIX, socket.SOCK_STREAM, 0)
+    if handle == ctypes.c_size_t(-1).value:
+        raise OSError(ws2.WSAGetLastError(), "AF_UNIX socket() failed")
+    address = SockaddrUn(_WINDOWS_AF_UNIX, encoded)
+    if ws2.connect(handle, ctypes.byref(address), ctypes.sizeof(address)) != 0:
+        error = ws2.WSAGetLastError()
+        ws2.closesocket(handle)
+        raise OSError(error, "AF_UNIX connect() failed")
+    sock = socket.socket(fileno=handle)
+    sock.settimeout(timeout)
+    return sock
+
+
 def connect(path, timeout):
     """Open the Herdr control socket at <path>; raise OSError on failure."""
     if WINDOWS and is_pipe_path(path):
         return _connect_pipe(path, timeout)
     family = getattr(socket, "AF_UNIX", None)
     if family is None:
+        if WINDOWS:
+            return _connect_windows_unix(path, timeout)
         raise OSError("this Python has no AF_UNIX support")
     sock = socket.socket(family, socket.SOCK_STREAM)
     try:
