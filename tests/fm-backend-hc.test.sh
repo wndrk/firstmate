@@ -207,6 +207,15 @@ test_agent_state_classifies_foreground_and_absence() {
 
 test_agent_state_reads_a_shell_wrappers_group() {
   local tag out wrapper
+  # POSIX process groups (set -m, pgrep -g) do not exist under Git Bash, and
+  # the adapter never reads them there: the Windows form of this rule is
+  # test_windows_agent_state_and_cwd_read_git_bash_processes.
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*)
+      pass "hc: agent_state reads a shell wrapper's process group # SKIP no POSIX process groups under Git Bash"
+      return 0
+      ;;
+  esac
   setup_case wrapper
   tag=$(hometag_of)
   # A shell wrapper in its own process group, waiting on a harness child.
