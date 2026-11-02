@@ -295,21 +295,42 @@ fm_backend_hc_hello() {  # <session>
 # fm_backend_hc_hello_held: the Windows form of the hello exchange. `hc
 # connect` forwards stdin's end as a write shutdown, which a Windows named
 # pipe cannot do without closing the whole connection, so a piped request
-# that ends at once loses its answer. The request is written to a connect
-# coprocess whose stdin stays open until one answer line arrives (bounded by
-# FM_BACKEND_HC_HELLO_TIMEOUT seconds, default 10), then the coprocess ends.
+# that ends at once loses its answer. Here the request is followed by a
+# writer that holds stdin open; the answer is polled from a file for up to
+# FM_BACKEND_HC_HELLO_TIMEOUT seconds (default 10), then the holder is
+# released and the connect ends. (Plain POSIX shell, so stock Bash 3.2 still
+# parses this file.)
 fm_backend_hc_hello_held() {  # <session> <request>
-  local session=$1 request=$2 line='' rc=0 timeout=${FM_BACKEND_HC_HELLO_TIMEOUT:-10}
-  coproc FM_HC_CONNECT { fm_backend_hc_env_run "$session" connect --session "$session" 2>/dev/null; }
-  local pid=$FM_HC_CONNECT_PID in_fd=${FM_HC_CONNECT[1]} out_fd=${FM_HC_CONNECT[0]}
-  printf '%s\n' "$request" 1>&"$in_fd" || rc=1
-  [ "$rc" -ne 0 ] || IFS= read -r -t "$timeout" line 0<&"$out_fd" || rc=1
-  # Closing the write end ends hc's stdin, so hc itself exits too; the kill
-  # covers a connect that is still waiting.
-  exec {in_fd}>&- {out_fd}<&-
+  local session=$1 request=$2 timeout=${FM_BACKEND_HC_HELLO_TIMEOUT:-10}
+  local dir line='' pid i=0
+  dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-hc-hello.XXXXXX") || return 1
+  {
+    printf '%s\n' "$request"
+    # shellcheck disable=SC2016 # expanded by the holder's own sh
+    sh -c 'i=0; while [ ! -e "$1" ] && [ "$i" -lt "$2" ]; do sleep 0.1; i=$((i + 1)); done' \
+      sh "$dir/done" $((timeout * 10 + 10))
+  } | fm_backend_hc_env_run "$session" connect --session "$session" >"$dir/out" 2>/dev/null &
+  pid=$!
+  while [ "$i" -lt $((timeout * 10)) ]; do
+    if [ -s "$dir/out" ]; then
+      IFS= read -r line <"$dir/out" || true
+      [ -z "$line" ] || break
+    fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  # Releasing the holder ends hc's stdin, so hc exits on its own; only a
+  # connect still running after that is stopped.
+  : >"$dir/done"
+  i=0
+  while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 20 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
-  [ "$rc" -eq 0 ] && [ -n "$line" ] || return 1
+  rm -rf "$dir"
+  [ -n "$line" ] || return 1
   printf '%s\n' "${line%$'\r'}"
 }
 
@@ -429,12 +450,12 @@ EOF
     ''|*[!0-9]*) ;;
     *)
       if live=$(fm_windows_console_cwd "$pid") && [ -n "$live" ]; then
-        printf '%s\n' "$live"
+        printf '%s\n' "$(fm_windows_canonical_path "$live")"
         return 0
       fi
       ;;
   esac
-  [ -z "$cwd" ] || printf '%s\n' "$(fm_windows_posix_path "$cwd")"
+  [ -z "$cwd" ] || printf '%s\n' "$(fm_windows_canonical_path "$(fm_windows_posix_path "$cwd")")"
 }
 
 fm_backend_hc_composer_caps() {

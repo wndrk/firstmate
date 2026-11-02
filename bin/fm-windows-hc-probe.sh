@@ -85,9 +85,9 @@ fi
 project="$SCRATCH/project dir"
 mkdir -p "$project/cwd probe"
 git init -q "$project" && git -C "$project" -c user.email=p@example.com -c user.name=probe commit -q --allow-empty -m init
-# The path as Windows resolves it, in Git Bash form: /tmp is a mount of the
-# user's Temp folder, and /proc reports the resolved form.
-project_real=$(cygpath -u "$(cygpath -w "$project")")
+# The adapter's own canonical spelling of the folder (/tmp is a mount of the
+# user's Temp folder, which can also read as /c/Users/... or an 8.3 name).
+project_real=$(fm_windows_canonical_path "$project")
 label=fm-probe1
 if address=$(fm_backend_hc_create_task "$SESSION" "$label" "$project_real" 2>"$SCRATCH/create.err"); then
   TARGET="$SESSION:$address"

@@ -46,6 +46,20 @@ fm_windows_posix_path() {  # <path>
   printf '%s' "$path"
 }
 
+# fm_windows_canonical_path: one Git Bash spelling per folder. The same
+# folder can read as /tmp/x, /c/Users/me/AppData/Local/Temp/x, or through an
+# 8.3 short name (C:\Users\RUNNER~1\...), depending on who reports it; the
+# long Windows form converted back through Git Bash's mount table is stable.
+fm_windows_canonical_path() {  # <path>
+  local win posix
+  command -v cygpath >/dev/null 2>&1 || { printf '%s' "$1"; return 0; }
+  win=$(cygpath -w -l -- "$1" 2>/dev/null) && [ -n "$win" ] \
+    && posix=$(cygpath -u -- "$win" 2>/dev/null) && [ -n "$posix" ] \
+    || { printf '%s' "$1"; return 0; }
+  [ "$posix" = / ] || posix=${posix%/}
+  printf '%s' "$posix"
+}
+
 # fm_windows_ps_rows: Git Bash's process table as
 # "<pid> <ppid> <winpid> <tty> <msys> <command>" lines. Cygwin's `ps -W`
 # prints PID PPID PGID WINPID TTY UID STIME COMMAND, with an optional leading
