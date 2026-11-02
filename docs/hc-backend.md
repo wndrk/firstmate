@@ -83,6 +83,7 @@ An input, capture, or close that carries the task label refuses a terminal whose
 - A worker inherits `HC_SESSION`, `HC_TERMINAL_ID`, `HC_TERMINAL_SOCKET`, and `HC_SCOPE` from its terminal, and the `config/launch-env-allowlist` floor keeps them; whether a real harness then reports native status under Firstmate's launch is not verified.
 - Naming a Herdr.app space needs the app window and is not done; whether the labels above display as intended in Herdr.app is not verified.
 - hc has no event stream this adapter consumes; supervision polls like tmux.
+- Native Windows runs under Git Bash with Windows-specific shell, process, path, and argument handling; [`windows.md`](windows.md) owns its setup and limits.
 
 ## Tests
 

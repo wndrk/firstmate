@@ -45,6 +45,14 @@
 #     agent_state also reads the rest of its process group from local `ps`.
 #   - hc has no event push this adapter consumes; supervision polls like tmux.
 #
+# Native Windows (docs/windows.md): herdr-core runs each terminal on a pseudo
+# console, which has no foreground process group, so `hc get` names the
+# terminal's first program - the shell - for as long as it lives, with a
+# Windows pid and a C:\ cwd. Under Git Bash this adapter therefore reads what
+# the shell runs, and the folder its newest bash sits in, from Git Bash's own
+# process table (bin/fm-windows-proc-lib.sh) instead of from that one process.
+# FM_BACKEND_HC_WINDOWS (1 or 0) overrides detection for tests.
+#
 # Binary gate: FM_HC_BIN wins, else `herdr-core`, else `hc` (the release
 # asset's name and its CLI alias). `<bin> --version` must report `hc x.y.z`
 # at or above FM_BACKEND_HC_MIN_VERSION, and container_ensure additionally
@@ -56,6 +64,8 @@
 . "$FM_BACKEND_LIB_DIR/fm-composer-lib.sh"
 # shellcheck source=bin/fm-agent-process-lib.sh
 . "$FM_BACKEND_LIB_DIR/fm-agent-process-lib.sh"
+# shellcheck source=bin/fm-windows-proc-lib.sh
+. "$FM_BACKEND_LIB_DIR/fm-windows-proc-lib.sh"
 
 # The verified floor: the oldest herdr-core release every adapter surface
 # (including `send --wait` and the `hello` handshake) was exercised against.
@@ -63,6 +73,14 @@ FM_BACKEND_HC_MIN_VERSION=0.1.14
 
 # The one protocol generation this adapter speaks.
 FM_BACKEND_HC_GENERATION=1
+
+fm_backend_hc_windows_host() {
+  case "${FM_BACKEND_HC_WINDOWS:-}" in
+    1) return 0 ;;
+    0) return 1 ;;
+  esac
+  fm_windows_host
+}
 
 # The hc session a new task is created on: the caller's HC_SESSION, else hc's
 # own default session name.
@@ -137,12 +155,31 @@ fm_backend_hc_env_run() {  # <session> <args...>
     echo "error: backend=hc selected but no 'herdr-core' or 'hc' binary was found on PATH (install Herdr Core per docs/hc-backend.md or set FM_HC_BIN)" >&2
     return 1
   }
+  # On Windows, Git Bash rewrites any argument that looks like a POSIX path
+  # (/usr/x, NAME=/x) into a Windows path when it starts a native program,
+  # which would change the text `hc send` types into a terminal. Every hc
+  # argument is therefore passed verbatim, and the one path argument (--cwd)
+  # is converted explicitly by its caller.
+  local noconv=()
+  ! fm_backend_hc_windows_host || noconv=('MSYS2_ARG_CONV_EXCL=*' 'MSYS_NO_PATHCONV=1')
   if [ -n "${FM_HC_SOCKET:-}" ]; then
-    env -u HC_TERMINAL_ID -u HC_TERMINAL_SOCKET -u HC_SCOPE \
+    env -u HC_TERMINAL_ID -u HC_TERMINAL_SOCKET -u HC_SCOPE "${noconv[@]}" \
       HC_SESSION="$session" HC_SOCKET="$FM_HC_SOCKET" "$bin" "$@"
   else
-    env -u HC_TERMINAL_ID -u HC_TERMINAL_SOCKET -u HC_SCOPE -u HC_SOCKET \
+    env -u HC_TERMINAL_ID -u HC_TERMINAL_SOCKET -u HC_SCOPE -u HC_SOCKET "${noconv[@]}" \
       HC_SESSION="$session" "$bin" "$@"
+  fi
+}
+
+# fm_backend_hc_native_path: <path> as herdr-core itself spells it - the
+# Windows form (C:\work\repo) on Windows, unchanged elsewhere.
+fm_backend_hc_native_path() {  # <path>
+  local converted
+  if fm_backend_hc_windows_host && command -v cygpath >/dev/null 2>&1 \
+    && converted=$(cygpath -w -- "$1" 2>/dev/null) && [ -n "$converted" ]; then
+    printf '%s' "$converted"
+  else
+    printf '%s' "$1"
   fi
 }
 
@@ -241,13 +278,60 @@ fm_backend_hc_target_ready() {  # <target> [expected-label]
 # fm_backend_hc_hello: the generation handshake for <session> over `hc
 # connect`. Prints the negotiated generation, nothing on failure.
 fm_backend_hc_hello() {  # <session>
-  local session=$1 out gen
-  out=$(printf '{"jsonrpc":"2.0","method":"hello","params":{"generation":%s},"id":1}\n' \
-      "$FM_BACKEND_HC_GENERATION" \
-    | fm_backend_hc_env_run "$session" connect --session "$session" 2>/dev/null) || return 1
+  local session=$1 out gen request
+  request=$(printf '{"jsonrpc":"2.0","method":"hello","params":{"generation":%s},"id":1}' \
+    "$FM_BACKEND_HC_GENERATION")
+  if fm_backend_hc_windows_host; then
+    out=$(fm_backend_hc_hello_held "$session" "$request") || return 1
+  else
+    out=$(printf '%s\n' "$request" \
+      | fm_backend_hc_env_run "$session" connect --session "$session" 2>/dev/null) || return 1
+  fi
   gen=$(printf '%s' "$out" | jq -r '.result.generation // empty' 2>/dev/null)
   [ -n "$gen" ] || return 1
   printf '%s' "$gen"
+}
+
+# fm_backend_hc_hello_held: the Windows form of the hello exchange. `hc
+# connect` forwards stdin's end as a write shutdown, which a Windows named
+# pipe cannot do without closing the whole connection, so a piped request
+# that ends at once loses its answer. Here the request is followed by a
+# writer that holds stdin open; the answer is polled from a file for up to
+# FM_BACKEND_HC_HELLO_TIMEOUT seconds (default 10), then the holder is
+# released and the connect ends. (Plain POSIX shell, so stock Bash 3.2 still
+# parses this file.)
+fm_backend_hc_hello_held() {  # <session> <request>
+  local session=$1 request=$2 timeout=${FM_BACKEND_HC_HELLO_TIMEOUT:-10}
+  local dir line='' pid i=0
+  dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-hc-hello.XXXXXX") || return 1
+  {
+    printf '%s\n' "$request"
+    # shellcheck disable=SC2016 # expanded by the holder's own sh
+    sh -c 'i=0; while [ ! -e "$1" ] && [ "$i" -lt "$2" ]; do sleep 0.1; i=$((i + 1)); done' \
+      sh "$dir/done" $((timeout * 10 + 10))
+  } | fm_backend_hc_env_run "$session" connect --session "$session" >"$dir/out" 2>/dev/null &
+  pid=$!
+  while [ "$i" -lt $((timeout * 10)) ]; do
+    if [ -s "$dir/out" ]; then
+      IFS= read -r line <"$dir/out" || true
+      [ -z "$line" ] || break
+    fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  # Releasing the holder ends hc's stdin, so hc exits on its own; only a
+  # connect still running after that is stopped.
+  : >"$dir/done"
+  i=0
+  while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 20 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  rm -rf "$dir"
+  [ -n "$line" ] || return 1
+  printf '%s\n' "${line%$'\r'}"
 }
 
 # fm_backend_hc_container_ensure: prove the binary is herdr-core at the
@@ -261,8 +345,13 @@ fm_backend_hc_container_ensure() {
     || { echo "error: backend=hc selected but 'jq' is not installed (required to parse hc's JSON output)" >&2; return 1; }
   session=$(fm_backend_hc_session)
   fm_backend_hc_atom_valid "$session" || { echo "error: refusing hc session name '$session'" >&2; return 1; }
-  fm_backend_hc_cli "$session" server status --json >/dev/null 2>&1 \
-    || { echo "error: 'hc server status' failed for session '$session'; is herdr-core installed and startable?" >&2; return 1; }
+  # On Windows `hc server status` only asks an existing core and never starts
+  # one (herdr-core's status_may_start_core is false there); `server start`
+  # starts the session's core or reports the one already running.
+  local verb=status
+  ! fm_backend_hc_windows_host || verb=start
+  fm_backend_hc_cli "$session" server "$verb" --json >/dev/null 2>&1 \
+    || { echo "error: 'hc server $verb' failed for session '$session'; is herdr-core installed and startable?" >&2; return 1; }
   gen=$(fm_backend_hc_hello "$session") || {
     echo "error: herdr-core session '$session' did not answer the hello handshake; is the core reachable?" >&2
     return 1
@@ -290,7 +379,7 @@ fm_backend_hc_create_task() {  # <session> <window-label> <cwd>
     return 1
   fi
   out=$(fm_backend_hc_cli "$session" run --bg --json --no-parent --outlive-parent --no-notify \
-    --cwd "$cwd" \
+    --cwd "$(fm_backend_hc_native_path "$cwd")" \
     --label "firstmate.task=$label" --label "firstmate.home=$home" \
     --label "herdr.space=${FM_HC_SPACE:-fm-$home}" --label "herdr.tab=$scoped" 2>&1) \
     || { echo "error: hc run failed for $label: $out" >&2; return 1; }
@@ -341,11 +430,32 @@ fm_backend_hc_send_text_line() {  # <target> <text> [expected-label]
   fm_backend_hc_cli "$FM_BACKEND_HC_SESSION" send --json "$FM_BACKEND_HC_ADDRESS" -- "$2" >/dev/null 2>&1
 }
 
+# fm_backend_hc_current_path: the foreground process's cwd. On Windows the
+# reported foreground is always the terminal shell, so the folder comes from
+# the newest bash on that shell's console (the shell, or the subshell
+# `treehouse get` opened), in Git Bash form, falling back to hc's own field.
 fm_backend_hc_current_path() {  # <target> [expected-label]
-  local json
+  local json fields pid cwd live
   fm_backend_hc_target_ready "$1" "${2:-}" || return 0
   json=$(fm_backend_hc_get "$1") || return 0
-  printf '%s' "$json" | jq -r '.foreground.cwd // .cwd // empty' 2>/dev/null
+  if ! fm_backend_hc_windows_host; then
+    printf '%s' "$json" | jq -r '.foreground.cwd // .cwd // empty' 2>/dev/null
+    return 0
+  fi
+  fields=$(printf '%s' "$json" | jq -r '[(.foreground.pid // "" | tostring), (.foreground.cwd // .cwd // "")] | @tsv' 2>/dev/null) || return 0
+  IFS=$'\t' read -r pid cwd <<EOF
+$fields
+EOF
+  case "$pid" in
+    ''|*[!0-9]*) ;;
+    *)
+      if live=$(fm_windows_console_cwd "$pid") && [ -n "$live" ]; then
+        printf '%s\n' "$(fm_windows_canonical_path "$live")"
+        return 0
+      fi
+      ;;
+  esac
+  [ -z "$cwd" ] || printf '%s\n' "$(fm_windows_canonical_path "$(fm_windows_posix_path "$cwd")")"
 }
 
 fm_backend_hc_composer_caps() {
@@ -479,9 +589,40 @@ EOF
   # of the same foreground process group, which is what tmux reads too. A shell
   # wrapper waiting on the harness is such a launcher, so a shell is only dead
   # once its group holds no harness.
+  if fm_backend_hc_windows_host; then
+    fm_backend_hc_windows_state "$pid" "$class"
+    return 0
+  fi
   fm_backend_hc_group_has_agent "$pid" && { printf 'alive'; return 0; }
   [ "$class" != shell ] || { printf 'dead'; return 0; }
   printf 'ambiguous'
+}
+
+# fm_backend_hc_windows_state: agent_state's verdict on Windows, where <pid>
+# is the terminal's first program (normally the Git Bash shell) for its whole
+# life. A harness anywhere under it or on its console is alive; a shell that
+# provably runs nothing is dead; anything else, including a shell Git Bash's
+# process table cannot see, is ambiguous.
+fm_backend_hc_windows_state() {  # <winpid> <class-of-winpid>
+  local pid=$1 class=$2 commands member command
+  if ! commands=$(fm_windows_shell_commands "$pid"); then
+    printf 'ambiguous'
+    return 0
+  fi
+  while read -r member command; do
+    [ -n "$member" ] || continue
+    if [ "$(fm_agent_process_classify "$command" "$command" "$command")" = agent ]; then
+      printf 'alive'
+      return 0
+    fi
+  done <<EOF
+$commands
+EOF
+  if [ "$class" = shell ] && [ -z "$commands" ]; then
+    printf 'dead'
+  else
+    printf 'ambiguous'
+  fi
 }
 
 # fm_backend_hc_group_has_agent: whether any other process in <pid>'s process

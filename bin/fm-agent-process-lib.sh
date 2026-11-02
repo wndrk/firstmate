@@ -30,6 +30,12 @@ unset _FM_AGENT_PROCESS_LIB_DIR
 fm_agent_process_classify_name() {  # <path> [argv0] -> agent|shell|other
   local path=$1 argv0=${2:-} base
   base=${path##*/}
+  # A native Windows host (herdr.exe, herdr-core) reports names and paths in
+  # Windows form: C:\Program Files\Git\usr\bin\bash.exe reads as bash.
+  base=${base##*\\}
+  case "$base" in
+    *.exe|*.EXE|*.Exe) base=${base%.*} ;;
+  esac
   base=${base#-}
   case "$base" in
     # muse is anchored rather than globbed like its neighbours: its installed
