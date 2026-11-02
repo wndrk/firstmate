@@ -142,15 +142,15 @@ rm -rf "$probe_dir"
 say "== herdr pane shell"
 git_root_win=$(cygpath -w / 2>/dev/null | tr -d '\r')
 git_root_win=${git_root_win%\\}
-BASH_WIN=
-for candidate in "$git_root_win\\bin\\bash.exe" "$git_root_win\\usr\\bin\\bash.exe"; do
-  if [ -f "$(cygpath -u "$candidate" 2>/dev/null)" ]; then
-    BASH_WIN=$candidate
-    break
-  fi
-done
-if [ -z "$BASH_WIN" ]; then
-  miss "could not locate Git Bash's bash.exe under $git_root_win"
+# The pane shell is Git's usr\bin\bash.exe itself, not the bin\bash.exe
+# launcher: the launcher starts the real bash one process down, which hides
+# that bash's pid, children, and cwd from Herdr and from the idle-shell proof
+# (measured on windows-latest with Herdr 0.9.5; docs/windows.md).
+BASH_WIN="$git_root_win\\usr\\bin\\bash.exe"
+BASH_WRAPPER_WIN="$git_root_win\\bin\\bash.exe"
+if [ ! -f "$(cygpath -u "$BASH_WIN" 2>/dev/null)" ]; then
+  miss "could not locate Git Bash's usr\\bin\\bash.exe under $git_root_win"
+  BASH_WIN=
 fi
 
 if [ -n "${HERDR_CONFIG_PATH:-}" ]; then
@@ -209,10 +209,10 @@ if [ -n "$HERDR_CONFIG" ] && [ -n "$BASH_WIN" ]; then
   current_shell=$(toml_terminal_value "$HERDR_CONFIG" default_shell)
   current_mode=$(toml_terminal_value "$HERDR_CONFIG" shell_mode)
   case "$current_shell" in
-    *[Bb]ash.exe*|*[Bb]ash[\'\"]*)
+    "'$BASH_WIN'"|"\"$BASH_WIN\"")
       ok "herdr terminal.default_shell is Git Bash: $current_shell"
       ;;
-    ''|"''"|'""')
+    ''|"''"|'""'|"'$BASH_WRAPPER_WIN'"|"\"$BASH_WRAPPER_WIN\"")
       if [ "$MODE" = apply ]; then
         if toml_terminal_set "$HERDR_CONFIG" default_shell "$(toml_string "$BASH_WIN")"; then
           ok "set herdr terminal.default_shell = $BASH_WIN in $HERDR_CONFIG"
@@ -220,7 +220,7 @@ if [ -n "$HERDR_CONFIG" ] && [ -n "$BASH_WIN" ]; then
           miss "could not write $HERDR_CONFIG"
         fi
       else
-        miss "herdr terminal.default_shell is unset, so panes start PowerShell; run bin/fm-windows-setup.sh to set Git Bash"
+        miss "herdr terminal.default_shell is ${current_shell:-unset}, not $BASH_WIN; run bin/fm-windows-setup.sh to set it"
       fi
       ;;
     *)

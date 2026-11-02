@@ -1552,13 +1552,12 @@ fm_backend_herdr_pane_idle_shell_sample() {  # <session> <pane-id>
 
 # fm_backend_herdr_pane_idle_shell_sample_windows: the Windows form of one
 # idle-shell sample, given the pane's process-info JSON. Windows has no Unix
-# foreground process group, and Herdr reports Windows process ids that Git
-# Bash's `ps` cannot address (MSYS keeps its own pid namespace), so the proof
-# rests on Herdr's own ConPTY process tree: the shell pid is known, exactly
-# one foreground process exists, it IS that shell, and its name and argv0 are
-# the same recognized shell once the .exe suffix is dropped. A bash running
-# any command (an agent, treehouse, a build) shows that child as a further
-# foreground process or as a non-shell foreground and is refused.
+# foreground process group, and Herdr 0.9.5 lists only the pane's shell as its
+# foreground process even while that shell runs a command (measured on
+# windows-latest: `sleep 20` under Git's usr\bin\bash.exe left process-info
+# unchanged). So Herdr proves the shape (one foreground process, it IS the
+# shell pid, a recognized shell once .exe is dropped) and Git Bash's own
+# process table proves the idleness: fm_backend_herdr_windows_shell_quiet.
 fm_backend_herdr_pane_idle_shell_sample_windows() {  # <process-info-json>
   local info=$1 shell_pid count process_pid name argv0 shell_name
   shell_pid=$(printf '%s' "$info" | jq -er \
@@ -1585,7 +1584,75 @@ fm_backend_herdr_pane_idle_shell_sample_windows() {  # <process-info-json>
   argv0=${argv0%.[eE][xX][eE]}
   [ "$argv0" = "$shell_name" ] || return 1
   case "$shell_name" in sh|bash|zsh|dash|ksh|fish) ;; *) return 1 ;; esac
+  fm_backend_herdr_windows_shell_quiet "$shell_pid" || return 1
   printf '%s\n' "$shell_pid"
+}
+
+# fm_backend_herdr_windows_ps_rows: Git Bash's process table as
+# "<pid> <ppid> <winpid> <tty> <msys> <command>" lines. Cygwin's `ps -W`
+# prints PID PPID PGID WINPID TTY UID STIME COMMAND, with an optional
+# leading status letter (I, S, O) that is dropped here. <msys> is 1 for an
+# MSYS process and 0 for a Windows-only row, which `ps -W` lists with PPID
+# and PGID 0 and a synthetic PID (Git's bin\bash.exe wrapper is one).
+fm_backend_herdr_windows_ps_rows() {
+  local ps_bin=${FM_HERDR_PS_BIN:-ps}
+  command -v "$ps_bin" >/dev/null 2>&1 || return 1
+  "$ps_bin" -W 2>/dev/null | awk '
+    NR == 1 { next }
+    {
+      if ($1 !~ /^[0-9]+$/) { $1 = ""; $0 = $0 }
+      if (NF < 8) next
+      command = $8
+      for (i = 9; i <= NF; i++) command = command " " $i
+      print $1, $2, $4, $5, ($3 == 0 ? 0 : 1), command
+    }'
+}
+
+# fm_backend_herdr_windows_shell_quiet: true when the MSYS bash whose Windows
+# pid is <winpid> runs nothing. Herdr reports the Windows pid; `ps -W` maps it
+# to the MSYS pid and console (consN). The shell is busy when any MSYS
+# process names it as parent, or when any other process holds its console:
+# a native program such as treehouse.exe breaks the MSYS parent chain, but
+# the bash it starts still shares the pane's console. A shell absent from the
+# table (Git's bin\bash.exe wrapper, which hides the real bash one level
+# down) is never proved quiet.
+fm_backend_herdr_windows_shell_quiet() {  # <winpid>
+  local winpid=$1 rows
+  rows=$(fm_backend_herdr_windows_ps_rows) || return 1
+  printf '%s\n' "$rows" | awk -v winpid="$winpid" '
+    { pid[NR] = $1; ppid[NR] = $2; win[NR] = $3; tty[NR] = $4 }
+    $3 == winpid && $5 == 1 { shell = $1; console = $4; found++ }
+    END {
+      if (found != 1) exit 1
+      for (i = 1; i <= NR; i++) {
+        if (pid[i] == shell) continue
+        if (ppid[i] == shell) exit 1
+        if (console != "?" && tty[i] == console) exit 1
+      }
+      exit 0
+    }'
+}
+
+# fm_backend_herdr_windows_pane_cwd: the cwd, in Git Bash form, of the newest
+# bash on the console of the MSYS shell whose Windows pid is <winpid>. That is
+# the pane shell itself, or the subshell `treehouse get` started in the
+# leased worktree. Cygwin publishes each process cwd at /proc/<pid>/cwd.
+fm_backend_herdr_windows_pane_cwd() {  # <winpid>
+  local winpid=$1 rows newest proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
+  rows=$(fm_backend_herdr_windows_ps_rows) || return 1
+  newest=$(printf '%s\n' "$rows" | awk -v winpid="$winpid" '
+    { pid[NR] = $1; win[NR] = $3; tty[NR] = $4; cmd[NR] = $6 }
+    $3 == winpid && $5 == 1 { shell = $1; console = $4 }
+    END {
+      if (shell == "") exit 1
+      best = shell
+      if (console != "?")
+        for (i = 1; i <= NR; i++)
+          if (tty[i] == console && cmd[i] ~ /(^|\/)bash(\.exe)?$/ && pid[i] + 0 > best + 0) best = pid[i]
+      print best
+    }') || return 1
+  [ -n "$newest" ] || return 1
+  readlink "$proc_root/$newest/cwd" 2>/dev/null
 }
 
 # fm_backend_herdr_projection_order_best_effort: place the exact workspace id
@@ -3285,7 +3352,18 @@ fm_backend_herdr_target_ready() {  # <target>
 # worktree subshell - confirmed live against a real treehouse acquisition.
 fm_backend_herdr_current_path() {  # <target>
   fm_backend_herdr_target_ready "$1" || return 0
-  local cwd
+  local cwd shell_pid
+  if fm_backend_herdr_windows_host; then
+    # Herdr 0.9.5 on Windows reports no foreground_cwd, and its pane cwd
+    # follows only the pane shell, never the subshell `treehouse get` opens,
+    # so the cwd is read from Git Bash's process table instead.
+    shell_pid=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane process-info --pane "$FM_BACKEND_HERDR_PANE" 2>/dev/null \
+      | jq -er '.result.process_info.shell_pid | select(type == "number") | floor' 2>/dev/null) || shell_pid=
+    if [ -n "$shell_pid" ] && cwd=$(fm_backend_herdr_windows_pane_cwd "$shell_pid") && [ -n "$cwd" ]; then
+      printf '%s\n' "$cwd"
+      return 0
+    fi
+  fi
   cwd=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane get "$FM_BACKEND_HERDR_PANE" 2>/dev/null \
     | jq -r '.result.pane.foreground_cwd // empty' 2>/dev/null) || return 0
   [ -n "$cwd" ] || return 0

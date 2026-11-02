@@ -167,6 +167,12 @@ except Exception:
     traceback.print_exc()
 ' "$sock" 2>&1)
   info transport-direct "$(printf '%s' "$diag" | tr '\n' ' ' | cut -c1-900)"
+  cat >"$SCRATCH/pipes.py" <<'PY'
+import os
+pipes = [name for name in os.listdir("\\\\.\\pipe\\") if "herdr" in name.lower()]
+print(pipes)
+PY
+  info herdr-pipes "$(python3 "$SCRATCH/pipes.py" 2>&1 | tr '\n' ' ' | cut -c1-900)"
 fi
 if fm_backend_herdr_events_capable "$SESSION"; then
   pass events-capable "events.subscribe capability gate passes"
@@ -225,41 +231,6 @@ if [ -n "$SPLIT" ] && pid=$(fm_backend_herdr_pane_idle_shell_pid "$SESSION" "$SP
   fi
 else
   fail death-close "could not create and prove an idle split pane: $out"
-fi
-
-# --- diagnostics: Git's usr\bin\bash.exe without the bin\bash.exe wrapper ---
-
-config_file="$(cygpath -u "$APPDATA")/herdr/config.toml"
-if [ -f "$config_file" ]; then
-  cp "$config_file" "$SCRATCH/config.toml.bak"
-  printf "[terminal]\ndefault_shell = '%s'\nshell_mode = \"login\"\n" "$(cygpath -w /usr/bin/bash.exe)" >"$config_file"
-  info alt-config "$(tr '\n' '|' <"$config_file")"
-  h server reload-config >/dev/null 2>&1 || true
-  out=$(h tab create --cwd "$ROOT" --label fm-win-usrbash --no-focus 2>&1)
-  ALT=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty')
-  if [ -n "$ALT" ]; then
-    sleep 2
-    info alt-idle "$(h pane process-info --pane "$ALT" 2>&1 | tr -d '\n' | cut -c1-900)"
-    h pane run "$ALT" "sleep 20" >/dev/null 2>&1
-    sleep 2
-    info alt-busy "$(h pane process-info --pane "$ALT" 2>&1 | tr -d '\n' | cut -c1-900)"
-    # shellcheck disable=SC2009  # Git Bash has no pgrep -W equivalent
-    info alt-ps-busy "$(ps -W 2>/dev/null | grep -iE 'bash|sleep' | tr -s ' ' | tr '\n' ';' | cut -c1-900)"
-    h pane send-keys "$ALT" ctrl+c >/dev/null 2>&1
-    sleep 1
-    mkdir -p "$SCRATCH/alt cwd"
-    h pane run "$ALT" "cd '$SCRATCH/alt cwd'" >/dev/null 2>&1
-    sleep 1.5
-    info alt-cd "$(h pane get "$ALT" 2>&1 | tr -d '\n' | cut -c1-900)"
-    info alt-cd-process "$(h pane process-info --pane "$ALT" 2>&1 | tr -d '\n' | cut -c1-900)"
-    # shellcheck disable=SC2016  # expands inside the pane's shell
-    h pane run "$ALT" 'echo "ALTENV MSYSTEM=$MSYSTEM git=$(command -v git) jq=$(command -v jq)"' >/dev/null 2>&1
-    sleep 1
-    info alt-read "$(h pane read "$ALT" --source recent --lines 15 2>&1 | tr '\n' '|' | cut -c1-600)"
-  else
-    info alt-shell "tab create failed: $out"
-  fi
-  cp "$SCRATCH/config.toml.bak" "$config_file"
 fi
 
 echo

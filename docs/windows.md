@@ -10,7 +10,7 @@ It runs under Git Bash from Git for Windows and drives the native Windows builds
 
 | Piece | Windows form |
 | --- | --- |
-| Shell for Firstmate and every worker pane | Git Bash (`bash.exe` from Git for Windows) |
+| Shell for Firstmate and every worker pane | Git Bash: Git for Windows' `usr\bin\bash.exe` |
 | Session backend | `herdr.exe` 0.9.5 or newer, with native ConPTY panes |
 | Worktrees | `treehouse.exe` |
 | JSON | `jq.exe` 1.7 or newer, run through the `bin/windows/jq` shim |
@@ -18,6 +18,7 @@ It runs under Git Bash from Git for Windows and drives the native Windows builds
 
 Herdr starts PowerShell in new panes by default on Windows.
 Firstmate types bash commands into its panes, so Herdr's `[terminal] default_shell` must point at Git Bash.
+It must be Git's `usr\bin\bash.exe`, not the `bin\bash.exe` launcher: the launcher starts the real bash one process down, which hides that bash's process id, children, and working directory from Herdr and from Firstmate.
 [`bin/fm-windows-setup.sh`](../bin/fm-windows-setup.sh) sets that up.
 
 ## Setup
@@ -49,7 +50,7 @@ Firstmate types bash commands into its panes, so Herdr's `[terminal] default_she
 
    It checks the tools and the checkout, then:
 
-   - sets Herdr's `[terminal] default_shell` to Git Bash and `shell_mode = "login"` in `%APPDATA%\herdr\config.toml` (it never replaces a different shell without `--force`);
+   - sets Herdr's `[terminal] default_shell` to Git's `usr\bin\bash.exe` and `shell_mode = "login"` in `%APPDATA%\herdr\config.toml` (it upgrades Git's `bin\bash.exe` launcher, and never replaces any other shell without `--force`);
    - adds one marked block to `~/.bashrc` that puts `bin/windows` first on `PATH`, records the real `jq.exe`, exports `SHELL=/usr/bin/bash`, sets `MSYS=winsymlinks:sys`, and defaults `FM_BACKEND` to `herdr`;
    - creates `~/.bash_profile` that sources `~/.bashrc` when you have none;
    - writes `config/backend` as `herdr` when it is absent.
@@ -67,8 +68,8 @@ These adapter behaviors switch on automatically under Git Bash (`fm_backend_herd
 | --- | --- | --- |
 | Control socket | Unix domain socket path | Named pipe, opened by [`bin/backends/herdr_transport.py`](../bin/backends/herdr_transport.py); the pipe name is its own identity |
 | Helper output | LF | The Herdr Python helpers force LF on stdout; `bin/windows/jq` runs `jq -b` |
-| Pane paths | POSIX | Herdr's `C:\...` foreground cwd is converted with `cygpath -u` |
-| Idle-shell proof | Foreground process group plus `ps` | Herdr's ConPTY process tree only: one foreground process that is the pane's bash |
+| Pane cwd | Herdr's `foreground_cwd` | Herdr 0.9.5 reports no `foreground_cwd` on Windows, so the cwd of the newest bash on the pane's console comes from Git Bash's `ps -W` and `/proc/<pid>/cwd`, which also follows the subshell `treehouse get` opens |
+| Idle-shell proof | Foreground process group plus `ps` | Herdr proves the pane's one foreground process is its bash; `ps -W` maps that Windows pid to the MSYS bash and proves no child process and nothing else on its console |
 | Pane-death close | `SIGHUP`, then `SIGKILL` to the shell pid | `exit` is submitted to the proved idle shell; there is no forced escalation |
 | Presentation lock directory | Must read back as mode `0700` | Owner check only, because Git Bash mounts NTFS with `noacl` |
 | Symlink locks | Native | `MSYS=winsymlinks:sys` makes `ln -s` create real links instead of copies |

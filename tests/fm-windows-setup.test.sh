@@ -15,6 +15,8 @@ FAKEBIN=$(fm_fakebin "$TMP_ROOT")
 FAKE_GIT="$TMP_ROOT/git-for-windows"
 mkdir -p "$FAKE_GIT/bin"
 : >"$FAKE_GIT/bin/bash.exe"
+mkdir -p "$FAKE_GIT/usr/bin"
+: >"$FAKE_GIT/usr/bin/bash.exe"
 
 cat >"$FAKEBIN/uname" <<'SH'
 #!/usr/bin/env bash
@@ -64,7 +66,7 @@ test_apply_writes_herdr_shell_and_bashrc() {
   config=$(config_of "$home")
   [ -f "$config" ] || fail "apply did not create the Herdr config: $out"
   grep -qx '\[terminal\]' "$config" || fail "config lacks [terminal]: $(cat "$config")"
-  grep -qx "default_shell = 'C:\\\\Git\\\\bin\\\\bash.exe'" "$config" \
+  grep -qx "default_shell = 'C:\\\\Git\\\\usr\\\\bin\\\\bash.exe'" "$config" \
     || fail "config does not point default_shell at Git Bash: $(cat "$config")"
   grep -qx 'shell_mode = "login"' "$config" || fail "config lacks shell_mode login: $(cat "$config")"
   grep -qF "export PATH=\"$FM/bin/windows:\$PATH\"" "$home/.bashrc" \
@@ -116,7 +118,7 @@ test_conflicting_shell_needs_force() {
   setup "$home" >/dev/null 2>&1
   grep -qx "default_shell = 'pwsh.exe'" "$config" || fail "apply replaced a user-chosen shell without --force"
   setup "$home" --force >/dev/null 2>&1
-  grep -qx "default_shell = 'C:\\\\Git\\\\bin\\\\bash.exe'" "$config" \
+  grep -qx "default_shell = 'C:\\\\Git\\\\usr\\\\bin\\\\bash.exe'" "$config" \
     || fail "--force did not replace the conflicting shell: $(cat "$config")"
   [ "$(grep -c '^default_shell' "$config")" = 1 ] || fail "--force left two default_shell lines"
   pass "a conflicting default_shell is replaced only with --force"
@@ -127,6 +129,18 @@ test_refuses_off_windows() {
   HOME="$TMP_ROOT/unix" bash "$FM/bin/fm-windows-setup.sh" --check >/dev/null 2>&1 || rc=$?
   [ "$rc" = 2 ] || fail "setup off Windows exited $rc, expected 2"
   pass "setup refuses to run off Git Bash on Windows"
+}
+
+test_git_launcher_shell_is_upgraded() {
+  local home config
+  home=$(fresh_home launcher)
+  config=$(config_of "$home")
+  mkdir -p "${config%/*}"
+  printf '%s\n' '[terminal]' "default_shell = 'C:\\Git\\bin\\bash.exe'" >"$config"
+  setup "$home" >/dev/null 2>&1
+  grep -qx "default_shell = 'C:\\\\Git\\\\usr\\\\bin\\\\bash.exe'" "$config" \
+    || fail "apply kept Git's bin\\bash.exe launcher: $(cat "$config")"
+  pass "Git's bin\\bash.exe launcher is upgraded to usr\\bin\\bash.exe without --force"
 }
 
 # The end-to-end probe only runs on the windows-latest workflow; here it must
@@ -142,5 +156,6 @@ fm_test_run \
   test_apply_is_idempotent_and_keeps_other_settings \
   test_check_mode_changes_nothing \
   test_conflicting_shell_needs_force \
+  test_git_launcher_shell_is_upgraded \
   test_refuses_off_windows \
   test_windows_probe_parses
