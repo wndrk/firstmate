@@ -336,11 +336,14 @@ fm_pi_extension_loaded() {
   [ -n "$marker_pid" ] || return 1
   # The extensions record the pid native Node sees, which on Windows is the bare
   # Windows pid that the lock stores tagged; fm_win_untag_pid accepts the tag
-  # only where that boundary applies.
+  # only where that boundary applies. A marker already in the tagged form
+  # still matches the lock literally.
   case "$lock_pid" in
     win:*)
-      _fm_wake_require_session_lock
-      lock_pid=$(fm_win_untag_pid "$lock_pid") || return 1
+      if [ "$marker_pid" != "$lock_pid" ]; then
+        _fm_wake_require_session_lock
+        lock_pid=$(fm_win_untag_pid "$lock_pid") || return 1
+      fi
       ;;
   esac
   [ "$marker_version" = "$expected_version" ] && [ "$marker_pid" = "$lock_pid" ] || return 1
